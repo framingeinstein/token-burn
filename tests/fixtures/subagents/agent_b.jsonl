@@ -1,0 +1,1 @@
+{"type":"assistant","uuid":"b1","timestamp":"2026-05-21T20:00:00.000Z","isSidechain":true,"cwd":"/Users/j/Documents/projects/FramingEinstein","message":{"id":"msg_B","model":"claude-haiku-4-5-20251001","content":[{"type":"text"}],"usage":{"input_tokens":1,"output_tokens":50,"cache_creation_input_tokens":1000,"cache_read_input_tokens":4000}}}
