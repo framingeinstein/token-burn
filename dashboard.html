@@ -211,10 +211,21 @@ document.getElementById('toggle').addEventListener('click', e=>{
 });
 
 async function boot(){
-  if (typeof DATA === "string") {            // not injected by build.sh → live server mode
-    DATA = await (await fetch("/api/data")).json();
+  try {
+    if (typeof DATA === "string") {          // not injected by build.sh → live server mode
+      DATA = await (await fetch("/api/data")).json();
+    }
+  } catch (e) {
+    document.getElementById("subtitle").textContent =
+      "Could not load /api/data — is the server running? (" + e + ")";
+    return;
   }
-  if (DATA && DATA.days) rerender();
+  if (DATA && DATA.days && DATA.days.length) {
+    rerender();
+  } else {
+    document.getElementById("subtitle").textContent =
+      "No data yet — run  python3 snapshot.py  (to seed the archive) or  ./build.sh.";
+  }
 }
 boot();
 </script>

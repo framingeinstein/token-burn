@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 DIR="$(pwd)"
 PY="$(command -v python3)"
 LINE="0 9 * * * cd '$DIR' && '$PY' snapshot.py >> '$DIR/snapshot.log' 2>&1"
-( crontab -l 2>/dev/null | grep -v "token-burn snapshot\|/snapshot.py" ; \
+( crontab -l 2>/dev/null | grep -vF "# token-burn snapshot" | grep -vF "$DIR/snapshot.py" | grep -vF "cd '$DIR' &&" ; \
   echo "# token-burn snapshot" ; echo "$LINE" ) | crontab -
 echo "installed daily cron (09:00 local):"
 echo "  $LINE"
