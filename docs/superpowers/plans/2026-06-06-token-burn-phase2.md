@@ -1145,7 +1145,7 @@ from ledger import assemble_rollup, today_str
 ap = argparse.ArgumentParser()
 ap.add_argument("--tz", default=None)
 ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
-ap.add_argument("--ledger", default=str(pathlib.Path(__file__).resolve().parent / "snapshots.jsonl"))
+ap.add_argument("--ledger", default="snapshots.jsonl")  # cwd is the script dir (cd above); __file__ is undefined in a stdin heredoc
 args, _ = ap.parse_known_args()
 
 tz = args.tz or _default_tz_name()
@@ -1221,7 +1221,7 @@ Then explicitly confirm tracking intent: `git check-ignore snapshots.jsonl` must
 - [ ] **Step 4: Update `README.md`**
 
 Add a "Phase 2 — durable snapshots + server" section documenting:
-- `python3 snapshot.py --backfill` (one-time seed) and `./install-cron.sh` (daily capture at 09:00).
+- `python3 snapshot.py` (seeds the archive on first run / catches up; same command runs daily) and `./install-cron.sh` (daily capture at 09:00).
 - `python3 serve.py` → live dashboard at the printed `http://127.0.0.1:<port>` (auto-increments if busy).
 - `./build.sh` → offline self-contained `out/dashboard.html`.
 - `snapshots.jsonl` is the committed archive; `prices.json` is the dated price table; cost is frozen at capture (`--refinalize` to re-price after a rate correction).
@@ -1247,7 +1247,7 @@ Expected: PASS (all of prices, parse, ledger, snapshot, serve).
 
 - [ ] **Step 2: Backfill the archive from the real logs**
 
-Run: `python3 snapshot.py --backfill`
+Run: `python3 snapshot.py` (the first run on an empty ledger backfills the full span)
 Expected: prints `+N day(s)` where N ≈ 30 (2026-05-07 → yesterday); lists any `unpriced models` (expect `['<synthetic>']`). Today is excluded.
 
 - [ ] **Step 3: Sanity-check the seeded ledger**
