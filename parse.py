@@ -15,18 +15,12 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# API $/MTok (validated 2026-06-05 against a companion cost deck).
-# cache write = 1.25x input, cache read = 0.10x input.
-PRICE = {
-    "opus":   {"in": 5.0, "out": 25.0},
-    "sonnet": {"in": 3.0, "out": 15.0},
-    "haiku":  {"in": 1.0, "out": 5.0},
-}
+from prices import load_prices, rate_for
 
 
 def dedupe_messages(raw_text):
     """One usage record per assistant message.id. Keys: id, model, timestamp,
-    cwd, is_sidechain, in, out, cc, cr."""
+    cwd, is_sidechain, in, out, cc, cr, n (occurrence count across content blocks)."""
     best = {}
     for line in raw_text.splitlines():
         if '"usage"' not in line:
@@ -54,8 +48,15 @@ def dedupe_messages(raw_text):
             "cr": usage.get("cache_read_input_tokens", 0) or 0,
         }
         prev = best.get(key)
-        if prev is None or rec["out"] > prev["out"]:
+        if prev is None:
+            rec["n"] = 1
             best[key] = rec
+        else:
+            rec["n"] = prev["n"] + 1
+            if rec["out"] >= prev["out"]:
+                best[key] = rec          # keep max-output occurrence
+            else:
+                prev["n"] = rec["n"]     # but always carry the running count
     return list(best.values())
 
 
@@ -67,13 +68,15 @@ def model_class(model):
         return "sonnet"
     if "haiku" in m:
         return "haiku"
-    return "sonnet"  # safe default for unknown
+    return "other"  # unknown/synthetic — no longer mispriced as sonnet
 
 
-def cost_usd(model, inp, out, cc, cr):
-    p = PRICE[model_class(model)]
-    return (inp * p["in"] + out * p["out"]
-            + cc * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1e6
+def cost_usd(prices, model, date, inp, out, cc, cr):
+    r = rate_for(prices, model, date)
+    if r is None:
+        return 0.0
+    return (inp * r["in"] + out * r["out"]
+            + cc * r["in"] * r["write_mult"] + cr * r["in"] * r["read_mult"]) / 1e6
 
 
 def _first_user_prompt(raw_text):
@@ -141,17 +144,20 @@ def local_day(ts_iso, tz):
     return dt.astimezone(tz).date().isoformat()
 
 
-def parse_session(raw_text, file_path, tz):
+def parse_session(raw_text, file_path, tz, prices):
     recs = dedupe_messages(raw_text)
     any_side = any(r["is_sidechain"] for r in recs)
     cwd = next((r["cwd"] for r in recs if r.get("cwd")), None)
     messages = []
     for r in recs:
+        day = local_day(r["timestamp"], tz)
         messages.append({
-            "day": local_day(r["timestamp"], tz),
+            "day": day,
+            "model": r["model"],
             "mclass": model_class(r["model"]),
             "in": r["in"], "out": r["out"], "cc": r["cc"], "cr": r["cr"],
-            "cost": cost_usd(r["model"], r["in"], r["out"], r["cc"], r["cr"]),
+            "n": r.get("n", 1),
+            "cost": cost_usd(prices, r["model"], day or "", r["in"], r["out"], r["cc"], r["cr"]),
         })
     return {
         "label": session_label(raw_text),
@@ -171,66 +177,92 @@ def _add(acc, m):
     acc["cost_usd"] += m["cost"]
 
 
-def build_rollup(sessions, tz_name, assistant_events, unique_messages):
+def build_days(sessions, since=None, until=None):
+    """Pure aggregation of parsed sessions into per-day records (no I/O)."""
     days = collections.defaultdict(lambda: {
+        "events": 0, "msgs": 0,
         "byModel": collections.defaultdict(_zero),
         "mainVsSub": {"main": _zero(), "sub": _zero()},
         "projects": collections.Counter(),
         "sessions": [],
     })
-    totals = _zero()
     for s in sessions:
         for m in s["messages"]:
             d = m["day"]
-            if d is None:
+            if d is None or (since and d < since) or (until and d > until):
                 continue
             bucket = days[d]
+            bucket["events"] += m.get("n", 1)
+            bucket["msgs"] += 1
             _add(bucket["byModel"][m["mclass"]], m)
             _add(bucket["mainVsSub"]["sub" if s["is_subagent"] else "main"], m)
             tok = m["in"] + m["out"] + m["cc"] + m["cr"]
             bucket["projects"][s["project"]] += tok
             bucket["sessions"].append((s["label"], s["project"], tok))
-            _add(totals, m)
 
-    out_days = []
+    out = []
     for date in sorted(days):
         b = days[date]
-        top_projects = [{"project": p, "total": t}
-                        for p, t in b["projects"].most_common(5)]
         sample = sorted(b["sessions"], key=lambda x: -x[2])[:5]
-        out_days.append({
+        out.append({
             "date": date,
+            "events": b["events"],
+            "msgs": b["msgs"],
             "byModel": {k: dict(v) for k, v in b["byModel"].items()},
             "mainVsSub": b["mainVsSub"],
-            "topProjects": top_projects,
-            "sampleSessions": [{"label": l, "project": p, "total": t}
-                               for l, p, t in sample],
+            "topProjects": [{"project": p, "total": t} for p, t in b["projects"].most_common(5)],
+            "sampleSessions": [{"label": l, "project": p, "total": t} for l, p, t in sample],
         })
-    return {
-        "meta": {"tz": tz_name, "assistant_events": assistant_events,
-                 "unique_messages": unique_messages, "totals": dict(totals)},
-        "days": out_days,
+    return out
+
+
+def _totals(days):
+    t = _zero()
+    for d in days:
+        for comp in d.get("byModel", {}).values():
+            for k in ("in", "out", "cc", "cr"):
+                t[k] += comp.get(k, 0)
+            t["cost_usd"] += comp.get("cost_usd", 0.0)
+    return t
+
+
+def day_records(root, tz_name, since=None, until=None, prices=None):
+    """Glob logs, parse, and return (per-day records in [since,until], meta)."""
+    if prices is None:
+        prices = load_prices()
+    tz = ZoneInfo(tz_name)
+    sessions = []
+    unpriced = set()
+    for f in glob.glob(os.path.join(str(root), "**", "*.jsonl"), recursive=True):
+        try:
+            with open(f, "r", errors="ignore") as fh:
+                raw = fh.read()
+        except Exception:
+            continue
+        s = parse_session(raw, f, tz, prices)
+        for m in s["messages"]:
+            d = m["day"]
+            if not (m["model"] and d):
+                continue
+            if (since and d < since) or (until and d > until):
+                continue
+            if rate_for(prices, m["model"], d) is None:
+                unpriced.add(m["model"])
+        sessions.append(s)
+    days = build_days(sessions, since, until)
+    meta = {
+        "tz": tz_name,
+        "assistant_events": sum(d["events"] for d in days),
+        "unique_messages": sum(d["msgs"] for d in days),
+        "totals": _totals(days),
+        "unpriced_models": sorted(unpriced),
     }
+    return days, meta
 
 
 def scan(root, tz_name):
-    tz = ZoneInfo(tz_name)
-    sessions = []
-    assistant_events = 0
-    unique_messages = 0
-    for f in glob.glob(os.path.join(str(root), "**", "*.jsonl"), recursive=True):
-        try:
-            raw = open(f, "r", errors="ignore").read()
-        except Exception:
-            continue
-        assistant_events += sum(
-            1 for ln in raw.splitlines()
-            if '"usage"' in ln and '"type":"assistant"' in ln.replace(" ", "")
-        )
-        s = parse_session(raw, f, tz)
-        unique_messages += len(s["messages"])
-        sessions.append(s)
-    return build_rollup(sessions, tz_name, assistant_events, unique_messages)
+    days, meta = day_records(root, tz_name)
+    return {"meta": meta, "days": days}
 
 
 def _default_tz_name():
@@ -245,7 +277,7 @@ def _default_tz_name():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build token-burn data.json from Claude Code logs.")
+    ap = argparse.ArgumentParser(description="Whole-corpus token-burn dump (ad-hoc).")
     ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--out", default=str(Path(__file__).parent / "data.json"))
@@ -257,6 +289,8 @@ def main():
     print(f"wrote {args.out}: {len(roll['days'])} days, tz={m['tz']}, "
           f"{m['assistant_events']} events -> {m['unique_messages']} unique msgs, "
           f"${m['totals']['cost_usd']:,.0f} total")
+    if m["unpriced_models"]:
+        print(f"  unpriced models (cost=0): {m['unpriced_models']}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+{
+  "version": "2026-06-06",
+  "default_cache_write_mult": 1.25,
+  "default_cache_read_mult": 0.10,
+  "rates": [
+    { "match": "claude-opus-4-8*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "claude-api skill — Anthropic pricing 2026-06" },
+    { "match": "claude-opus-4-7*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "claude-api skill / web — Opus 4.x = $5/$25" },
+    { "match": "claude-opus-4-1*",   "in": 15.0, "out": 75.0, "from": "2024-01-01", "to": null, "source": "web — deprecated Opus 4.0/4.1 legacy rate" },
+    { "match": "claude-opus-4-0*",   "in": 15.0, "out": 75.0, "from": "2024-01-01", "to": null, "source": "web — deprecated Opus 4.0/4.1 legacy rate" },
+    { "match": "claude-sonnet-4-6*", "in": 3.0, "out": 15.0, "from": "2025-01-01", "to": null, "source": "claude-api skill" },
+    { "match": "claude-haiku-4-5*",  "in": 1.0, "out": 5.0,  "from": "2025-01-01", "to": null, "source": "claude-api skill" }
+  ],
+  "unpriced": ["<synthetic>"]
+}

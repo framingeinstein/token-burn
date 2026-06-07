@@ -58,3 +58,36 @@ uploaded. `data.json` and `out/` are gitignored.
 ```bash
 python3 -m pytest tests/ -v   # parser unit + integration tests
 ```
+
+## Phase 2 — durable snapshots + server
+
+Phase 2 adds a committed snapshot archive so daily history survives Claude Code's ~30-day log
+retention, a live HTTP server, and a self-contained build that includes today's data.
+
+### Commands
+
+- **`python3 snapshot.py`** — freezes each completed day into `snapshots.jsonl` (append-only).
+  The first run seeds the full span still on disk; later runs catch up from the last recorded day.
+  Run it daily.
+
+- **`./install-cron.sh`** — installs a daily 09:00 cron entry that runs the snapshotter and
+  appends output to `snapshot.log`. Idempotent — safe to run again after updates. View the
+  installed entry with `crontab -l`.
+
+- **`python3 serve.py`** — serves the live dashboard at the `http://127.0.0.1:<port>` printed on
+  startup (defaults to 8799; auto-increments to the next free port if taken).
+  - `/api/data` — merges the frozen `snapshots.jsonl` archive with a live parse of today's logs.
+  - `/healthz` — health check.
+
+- **`./build.sh`** — writes a fully self-contained `out/dashboard.html` (frozen archive + live
+  today inlined) openable by double-click, no server needed.
+
+### The archive
+
+`snapshots.jsonl` is the committed, append-only archive — it's the durable history that survives
+log expiry. `prices.json` is the dated price table; cost is **frozen at capture time**. After a
+rate correction, re-price history with:
+
+```bash
+python3 snapshot.py --refinalize --since YYYY-MM-DD
+```

@@ -61,7 +61,7 @@
 <footer id="foot"></footer>
 
 <script>
-const DATA = "__DATA_PLACEHOLDER__";
+let DATA = "__DATA_PLACEHOLDER__";
 let METRIC = 'total';
 const METRIC_LBL = {total:'total compute touched', generative:'generative tokens', output:'output tokens', cost:'API-equivalent $'};
 
@@ -210,8 +210,24 @@ document.getElementById('toggle').addEventListener('click', e=>{
   rerender();
 });
 
-if (DATA && DATA.days) rerender();
-else document.body.insertAdjacentHTML('beforeend','<p style="padding:32px;color:#a00">No data — run build.sh.</p>');
+async function boot(){
+  try {
+    if (typeof DATA === "string") {          // not injected by build.sh → live server mode
+      DATA = await (await fetch("/api/data")).json();
+    }
+  } catch (e) {
+    document.getElementById("subtitle").textContent =
+      "Could not load /api/data — is the server running? (" + e + ")";
+    return;
+  }
+  if (DATA && DATA.days && DATA.days.length) {
+    rerender();
+  } else {
+    document.getElementById("subtitle").textContent =
+      "No data yet — run  python3 snapshot.py  (to seed the archive) or  ./build.sh.";
+  }
+}
+boot();
 </script>
 </body>
 </html>
