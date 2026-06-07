@@ -32,3 +32,9 @@ def test_rate_for_synthetic_is_none():
 def test_load_prices_reads_repo_table():
     p = load_prices()
     assert "version" in p and isinstance(p["rates"], list)
+    assert rate_for(p, "claude-sonnet-4-6-20261101", "2026-06-01") is not None
+    assert rate_for(p, "claude-haiku-4-5-20251001", "2025-10-05") is not None
+
+
+def test_rate_for_none_model_is_none():
+    assert rate_for(_table(), None, "2026-05-21") is None
