@@ -218,12 +218,14 @@ from zoneinfo import ZoneInfo
 from prices import load_prices
 from parse import (
     dedupe_messages, model_class, cost_usd, session_label,
-    project_of, is_subagent, local_day, parse_session, build_days, day_records, scan,
+    project_of, is_subagent, local_day, parse_session, build_rollup, scan,
 )
 
 UTC = ZoneInfo("UTC")
 PRICES = load_prices()
 ```
+
+> Note: keep importing `build_rollup, scan` here — `build_days`/`day_records` don't exist until Task 3, which swaps this import line. In this task `parse_session` still calls the old `cost_usd`, so `test_parse_session` and `test_scan` will fail in a *full* run; that's expected and Task 3 restores them. Run only the `-k` subset below for this task.
 
 Replace `test_model_class_maps_families` and `test_cost_usd_matches_deck_weights`:
 
@@ -327,7 +329,16 @@ git commit -m "feat: date+price-aware cost_usd; model_class other default; dedup
 
 - [ ] **Step 1: Update the failing tests**
 
-In `tests/test_parse.py`, replace `test_parse_session_aggregates_with_label_project_subagent`, the `_sess` helper + `test_build_rollup_shape_and_sanity`, and `test_scan_fixture_dir_dedupes_and_flags_subagent`:
+First update the `parse` import line in `tests/test_parse.py` to swap `build_rollup` → `build_days, day_records` (drop `build_rollup`, which is replaced this task):
+
+```python
+from parse import (
+    dedupe_messages, model_class, cost_usd, session_label,
+    project_of, is_subagent, local_day, parse_session, build_days, day_records, scan,
+)
+```
+
+Then in `tests/test_parse.py`, replace `test_parse_session_aggregates_with_label_project_subagent`, the `_sess` helper + `test_build_rollup_shape_and_sanity`, and `test_scan_fixture_dir_dedupes_and_flags_subagent`:
 
 ```python
 def test_parse_session_aggregates_with_label_project_subagent():
