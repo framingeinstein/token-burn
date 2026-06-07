@@ -2,7 +2,7 @@
 from pathlib import Path
 from prices import load_prices
 from ledger import read_ledger
-from snapshot import run, _prev_day
+from snapshot import run, _prev_day, _next_day
 
 FIX = Path(__file__).parent / "fixtures"   # all logs dated 2026-05-21 (UTC)
 P = load_prices()
@@ -10,6 +10,13 @@ P = load_prices()
 def test_prev_day():
     assert _prev_day("2026-06-01") == "2026-05-31"
     assert _prev_day("2026-05-01") == "2026-04-30"
+    assert _prev_day("2026-01-01") == "2025-12-31"   # year boundary
+
+
+def test_next_day():
+    assert _next_day("2025-12-31") == "2026-01-01"   # year boundary
+    assert _next_day("2026-02-28") == "2026-03-01"
+    assert _next_day("2024-02-29") == "2024-03-01"   # leap year
 
 def test_finalizes_completed_day_not_today(tmp_path):
     led = str(tmp_path / "s.jsonl")

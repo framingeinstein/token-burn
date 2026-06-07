@@ -1,9 +1,10 @@
 """Daily snapshot capture (cron entry). Idempotent + catch-up.
 
 Finalizes every COMPLETE day (date < today, local tz) not already in the ledger.
-  snapshot.py                       # daily: finalize missing complete days
-  snapshot.py --backfill            # same engine, full log span (first-run seed)
-  snapshot.py --refinalize --since 2026-05-20   # re-freeze a range (rate fix)
+The first run on an empty ledger backfills the full log span still on disk;
+later runs add only missing days, so a missed run self-heals within retention.
+  snapshot.py                                   # daily run AND first-run backfill
+  snapshot.py --refinalize --since 2026-05-20   # re-freeze a date range (rate fix)
 """
 import argparse
 import os
@@ -49,16 +50,14 @@ def main():
     ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--ledger", default=str(Path(__file__).parent / "snapshots.jsonl"))
-    ap.add_argument("--backfill", action="store_true",
-                    help="finalize all complete days present in logs (first-run seed)")
     ap.add_argument("--refinalize", action="store_true",
                     help="re-append fresh lines (latest wins on read) for a rate/parser fix")
-    ap.add_argument("--since", default=None, help="floor date YYYY-MM-DD for --refinalize/backfill")
+    ap.add_argument("--since", default=None, help="floor date YYYY-MM-DD for --refinalize")
     args = ap.parse_args()
 
     prices = load_prices()
     today = today_str(args.tz)
-    since = args.since  # None => full span (backfill is the default catch-up behavior)
+    since = args.since  # None => full span (the default catch-up behavior)
     added, days, meta, existing = run(args.root, args.tz, args.ledger, prices, today,
                                       refinalize=args.refinalize, since=since)
     led = read_ledger(args.ledger)
