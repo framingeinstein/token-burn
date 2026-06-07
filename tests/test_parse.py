@@ -162,6 +162,7 @@ def test_parse_session_aggregates_with_label_project_subagent():
     assert s["is_subagent"] is False and len(s["messages"]) == 1
     m = s["messages"][0]
     assert m["day"] == "2026-05-21" and m["mclass"] == "opus" and m["n"] == 2
+    assert m["out"] == 100 and m["cr"] == 5000
     assert round(m["cost"], 6) == round(cost_usd(PRICES, "claude-opus-4-8", "2026-05-21", 1, 100, 2000, 5000), 6)
 
 
@@ -227,3 +228,16 @@ def test_dedupe_messages_counts_occurrences_lower_second():
     ])
     recs = dedupe_messages(raw)
     assert len(recs) == 1 and recs[0]["out"] == 99 and recs[0]["n"] == 2
+
+
+def test_day_records_reports_unpriced_models(tmp_path):
+    line = json.dumps({"type":"assistant","uuid":"s1","timestamp":"2026-05-21T12:00:00.000Z",
+                       "cwd":"/Users/j/Documents/projects/foo",
+                       "message":{"id":"msg_S","model":"<synthetic>","content":[{"type":"text"}],
+                                  "usage":{"input_tokens":1,"output_tokens":2,
+                                           "cache_creation_input_tokens":0,"cache_read_input_tokens":0}}})
+    (tmp_path / "s.jsonl").write_text(line + "\n")
+    days, meta = day_records(tmp_path, "UTC", prices=PRICES)
+    assert "<synthetic>" in meta["unpriced_models"]
+    # synthetic priced at $0
+    assert meta["totals"]["cost_usd"] == 0.0

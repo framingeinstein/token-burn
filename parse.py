@@ -235,12 +235,18 @@ def day_records(root, tz_name, since=None, until=None, prices=None):
     unpriced = set()
     for f in glob.glob(os.path.join(str(root), "**", "*.jsonl"), recursive=True):
         try:
-            raw = open(f, "r", errors="ignore").read()
+            with open(f, "r", errors="ignore") as fh:
+                raw = fh.read()
         except Exception:
             continue
         s = parse_session(raw, f, tz, prices)
         for m in s["messages"]:
-            if m["model"] and m["day"] and rate_for(prices, m["model"], m["day"]) is None:
+            d = m["day"]
+            if not (m["model"] and d):
+                continue
+            if (since and d < since) or (until and d > until):
+                continue
+            if rate_for(prices, m["model"], d) is None:
                 unpriced.add(m["model"])
         sessions.append(s)
     days = build_days(sessions, since, until)
