@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from prices import load_prices
 from parse import (
     dedupe_messages, model_class, cost_usd, session_label,
-    project_of, is_subagent, local_day, parse_session, build_rollup, scan,
+    project_of, is_subagent, local_day, parse_session, build_days, day_records, scan,
 )
 
 UTC = ZoneInfo("UTC")
@@ -144,46 +144,44 @@ def test_local_day_handles_missing_timestamp():
 
 def test_parse_session_aggregates_with_label_project_subagent():
     raw = "\n".join([
-        json.dumps({"type": "summary", "aiTitle": "Fix the parser"}),
-        _user("please fix the parser"),
-        _line("msg_A", "text", out=100, cc=2000, cr=5000,
-              cwd="/Users/j/Documents/projects/FramingEinstein",
-              model="claude-opus-4-8", ts="2026-05-21T19:00:00.000Z"),
-        _line("msg_A", "tool_use", out=100, cc=2000, cr=5000,
-              cwd="/Users/j/Documents/projects/FramingEinstein",
-              model="claude-opus-4-8", ts="2026-05-21T19:00:00.000Z"),
+        json.dumps({"type":"summary","aiTitle":"Fix the parser"}),
+        json.dumps({"type":"user","isMeta":False,"message":{"role":"user","content":"please fix the parser"}}),
+        json.dumps({"type":"assistant","uuid":"a1","timestamp":"2026-05-21T19:00:00.000Z",
+                    "cwd":"/Users/j/Documents/projects/FramingEinstein",
+                    "message":{"id":"msg_A","model":"claude-opus-4-8","content":[{"type":"text"}],
+                               "usage":{"input_tokens":1,"output_tokens":100,
+                                        "cache_creation_input_tokens":2000,"cache_read_input_tokens":5000}}}),
+        json.dumps({"type":"assistant","uuid":"a2","timestamp":"2026-05-21T19:00:00.000Z",
+                    "cwd":"/Users/j/Documents/projects/FramingEinstein",
+                    "message":{"id":"msg_A","model":"claude-opus-4-8","content":[{"type":"tool_use"}],
+                               "usage":{"input_tokens":1,"output_tokens":100,
+                                        "cache_creation_input_tokens":2000,"cache_read_input_tokens":5000}}}),
     ])
-    s = parse_session(raw, "/x/session.jsonl", UTC)
-    assert s["label"] == "Fix the parser"
-    assert s["project"] == "FramingEinstein"
-    assert s["is_subagent"] is False
-    assert len(s["messages"]) == 1
+    s = parse_session(raw, "/x/session.jsonl", UTC, PRICES)
+    assert s["label"] == "Fix the parser" and s["project"] == "FramingEinstein"
+    assert s["is_subagent"] is False and len(s["messages"]) == 1
     m = s["messages"][0]
-    assert m["day"] == "2026-05-21" and m["mclass"] == "opus"
-    assert m["out"] == 100 and m["cr"] == 5000
-    assert round(m["cost"], 6) == round(cost_usd("claude-opus-4-8", 1, 100, 2000, 5000), 6)
+    assert m["day"] == "2026-05-21" and m["mclass"] == "opus" and m["n"] == 2
+    assert round(m["cost"], 6) == round(cost_usd(PRICES, "claude-opus-4-8", "2026-05-21", 1, 100, 2000, 5000), 6)
 
 
-# --- build_rollup ---
+# --- build_days ---
 
-def _sess(project, sub, label, day, mclass, comps, cost):
+def _sess(project, sub, label, day, mclass, comps, cost, n=1):
     i, o, cc, cr = comps
     return {"label": label, "project": project, "is_subagent": sub,
-            "messages": [{"day": day, "mclass": mclass, "in": i, "out": o,
-                          "cc": cc, "cr": cr, "cost": cost}]}
+            "messages": [{"day": day, "model": mclass, "mclass": mclass, "in": i, "out": o,
+                          "cc": cc, "cr": cr, "cost": cost, "n": n}]}
 
 
-def test_build_rollup_shape_and_sanity():
+def test_build_days_shape_and_counts():
     sessions = [
-        _sess("FramingEinstein", False, "main work", "2026-05-21", "opus",
-              (1, 100, 2000, 5000), 0.20),
-        _sess("FramingEinstein", True, "subagent work", "2026-05-21", "opus",
-              (0, 50, 1000, 4000), 0.10),
+        _sess("FramingEinstein", False, "main work", "2026-05-21", "opus", (1,100,2000,5000), 0.20, n=2),
+        _sess("FramingEinstein", True, "subagent work", "2026-05-21", "opus", (0,50,1000,4000), 0.10, n=1),
     ]
-    roll = build_rollup(sessions, tz_name="UTC", assistant_events=7, unique_messages=2)
-    assert roll["meta"]["assistant_events"] == 7
-    assert roll["meta"]["unique_messages"] == 2
-    day = next(d for d in roll["days"] if d["date"] == "2026-05-21")
+    days = build_days(sessions)
+    day = next(d for d in days if d["date"] == "2026-05-21")
+    assert day["events"] == 3 and day["msgs"] == 2
     bm = day["byModel"]["opus"]
     assert bm["out"] == 150 and bm["cr"] == 9000
     assert round(bm["cost_usd"], 4) == 0.30
@@ -191,17 +189,41 @@ def test_build_rollup_shape_and_sanity():
     assert round(day["mainVsSub"]["sub"]["out"]) == 50
     assert day["topProjects"][0]["project"] == "FramingEinstein"
     assert any(s["label"] == "subagent work" for s in day["sampleSessions"])
-    assert round(roll["meta"]["totals"]["cost_usd"], 4) == 0.30
 
 
-# --- scan (integration) ---
+def test_build_days_filters_by_range():
+    sessions = [
+        _sess("p", False, "old", "2026-05-01", "opus", (0,1,0,0), 0.0),
+        _sess("p", False, "mid", "2026-05-15", "opus", (0,1,0,0), 0.0),
+        _sess("p", False, "new", "2026-05-31", "opus", (0,1,0,0), 0.0),
+    ]
+    dates = [d["date"] for d in build_days(sessions, since="2026-05-10", until="2026-05-20")]
+    assert dates == ["2026-05-15"]
 
-def test_scan_fixture_dir_dedupes_and_flags_subagent():
+
+def test_day_records_fixture_dir_dedupes_and_flags_subagent():
     root = Path(__file__).parent / "fixtures"
-    roll = scan(root, tz_name="UTC")
-    assert roll["meta"]["assistant_events"] == 3
-    assert roll["meta"]["unique_messages"] == 2
-    day = next(d for d in roll["days"] if d["date"] == "2026-05-21")
+    days, meta = day_records(root, "UTC", prices=PRICES)
+    assert meta["assistant_events"] == 3 and meta["unique_messages"] == 2
+    day = next(d for d in days if d["date"] == "2026-05-21")
     assert "opus" in day["byModel"] and "haiku" in day["byModel"]
     assert day["byModel"]["opus"]["out"] == 100
     assert day["mainVsSub"]["sub"]["out"] == 50
+    assert day["events"] == 3 and day["msgs"] == 2
+
+
+def test_scan_wrapper_still_returns_meta_and_days():
+    root = Path(__file__).parent / "fixtures"
+    roll = scan(root, "UTC")
+    assert roll["meta"]["unique_messages"] == 2 and len(roll["days"]) >= 1
+
+
+# --- dedupe_messages lower-output-second branch ---
+
+def test_dedupe_messages_counts_occurrences_lower_second():
+    raw = "\n".join([
+        _line("msg_B", "text", out=99),
+        _line("msg_B", "text", out=5),
+    ])
+    recs = dedupe_messages(raw)
+    assert len(recs) == 1 and recs[0]["out"] == 99 and recs[0]["n"] == 2
