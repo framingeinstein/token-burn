@@ -2,12 +2,14 @@ import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from prices import load_prices
 from parse import (
     dedupe_messages, model_class, cost_usd, session_label,
     project_of, is_subagent, local_day, parse_session, build_rollup, scan,
 )
 
 UTC = ZoneInfo("UTC")
+PRICES = load_prices()
 
 
 def _line(mid, block, out, *, inp=1, cc=0, cr=0, model="claude-opus-4-8",
@@ -70,13 +72,29 @@ def test_model_class_maps_families():
     assert model_class("claude-opus-4-8") == "opus"
     assert model_class("claude-sonnet-4-6") == "sonnet"
     assert model_class("claude-haiku-4-5-20251001") == "haiku"
-    assert model_class(None) == "sonnet"
-
+    assert model_class("<synthetic>") == "other"   # was mispriced as sonnet in Phase 1
+    assert model_class(None) == "other"
 
 def test_cost_usd_matches_deck_weights():
-    assert round(cost_usd("claude-opus-4-8", 0, 0, 0, 1_000_000), 4) == 0.5
-    assert round(cost_usd("claude-opus-4-8", 0, 1_000_000, 0, 0), 4) == 25.0
-    assert round(cost_usd("claude-opus-4-8", 0, 0, 1_000_000, 0), 4) == 6.25
+    d = "2026-05-21"
+    assert round(cost_usd(PRICES, "claude-opus-4-8", d, 0, 0, 0, 1_000_000), 4) == 0.5
+    assert round(cost_usd(PRICES, "claude-opus-4-8", d, 0, 1_000_000, 0, 0), 4) == 25.0
+    assert round(cost_usd(PRICES, "claude-opus-4-8", d, 0, 0, 1_000_000, 0), 4) == 6.25
+
+def test_cost_usd_unpriced_model_is_zero():
+    assert cost_usd(PRICES, "<synthetic>", "2026-05-21", 1, 1, 1, 1) == 0.0
+
+def test_dedupe_messages_counts_occurrences():
+    raw = "\n".join([
+        json.dumps({"type":"assistant","uuid":"a1","timestamp":"2026-05-20T10:00:00Z",
+                    "message":{"id":"msg_A","model":"claude-opus-4-8","content":[{"type":"text"}],
+                               "usage":{"input_tokens":1,"output_tokens":5}}}),
+        json.dumps({"type":"assistant","uuid":"a2","timestamp":"2026-05-20T10:00:00Z",
+                    "message":{"id":"msg_A","model":"claude-opus-4-8","content":[{"type":"tool_use"}],
+                               "usage":{"input_tokens":1,"output_tokens":5}}}),
+    ])
+    recs = dedupe_messages(raw)
+    assert len(recs) == 1 and recs[0]["n"] == 2
 
 
 # --- session_label ---

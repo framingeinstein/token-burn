@@ -15,13 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# API $/MTok (validated 2026-06-05 against a companion cost deck).
-# cache write = 1.25x input, cache read = 0.10x input.
-PRICE = {
-    "opus":   {"in": 5.0, "out": 25.0},
-    "sonnet": {"in": 3.0, "out": 15.0},
-    "haiku":  {"in": 1.0, "out": 5.0},
-}
+from prices import load_prices, rate_for
 
 
 def dedupe_messages(raw_text):
@@ -54,8 +48,15 @@ def dedupe_messages(raw_text):
             "cr": usage.get("cache_read_input_tokens", 0) or 0,
         }
         prev = best.get(key)
-        if prev is None or rec["out"] > prev["out"]:
+        if prev is None:
+            rec["n"] = 1
             best[key] = rec
+        else:
+            rec["n"] = prev["n"] + 1
+            if rec["out"] >= prev["out"]:
+                best[key] = rec          # keep max-output occurrence
+            else:
+                prev["n"] = rec["n"]     # but always carry the running count
     return list(best.values())
 
 
@@ -67,13 +68,15 @@ def model_class(model):
         return "sonnet"
     if "haiku" in m:
         return "haiku"
-    return "sonnet"  # safe default for unknown
+    return "other"  # unknown/synthetic — no longer mispriced as sonnet
 
 
-def cost_usd(model, inp, out, cc, cr):
-    p = PRICE[model_class(model)]
-    return (inp * p["in"] + out * p["out"]
-            + cc * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1e6
+def cost_usd(prices, model, date, inp, out, cc, cr):
+    r = rate_for(prices, model, date)
+    if r is None:
+        return 0.0
+    return (inp * r["in"] + out * r["out"]
+            + cc * r["in"] * r["write_mult"] + cr * r["in"] * r["read_mult"]) / 1e6
 
 
 def _first_user_prompt(raw_text):
