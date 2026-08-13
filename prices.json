@@ -1,14 +1,29 @@
 {
-  "version": "2026-06-06",
+  "version": "2026-08-13",
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing — model pricing table, fetched 2026-08-13",
+  "notes": [
+    "Order matters: rate_for returns the FIRST matching pattern, and prefix globs overlap (claude-sonnet-4* also matches claude-sonnet-4-6). Keep specific patterns above general ones.",
+    "KNOWN GAP — cache writes actually bill by time-to-live tier: 1.25x base input for the 5-minute cache but 2x for the 1-hour cache. This schema carries a single write multiplier, so 1-hour writes are priced at 1.25x and understated. Agentic sessions write predominantly 1-hour caches, so this understates real cost; measured at roughly 13% low on Claude Code traffic. Fixing it means reading usage.cache_creation.ephemeral_{5m,1h}_input_tokens in parse.py and adding a second multiplier here.",
+    "Cache read (hit) is 0.1x base input for every current model, which the default multiplier already matches."
+  ],
   "default_cache_write_mult": 1.25,
   "default_cache_read_mult": 0.10,
   "rates": [
-    { "match": "claude-opus-4-8*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "claude-api skill — Anthropic pricing 2026-06" },
-    { "match": "claude-opus-4-7*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "claude-api skill / web — Opus 4.x = $5/$25" },
-    { "match": "claude-opus-4-1*",   "in": 15.0, "out": 75.0, "from": "2024-01-01", "to": null, "source": "web — deprecated Opus 4.0/4.1 legacy rate" },
-    { "match": "claude-opus-4-0*",   "in": 15.0, "out": 75.0, "from": "2024-01-01", "to": null, "source": "web — deprecated Opus 4.0/4.1 legacy rate" },
-    { "match": "claude-sonnet-4-6*", "in": 3.0, "out": 15.0, "from": "2025-01-01", "to": null, "source": "claude-api skill" },
-    { "match": "claude-haiku-4-5*",  "in": 1.0, "out": 5.0,  "from": "2025-01-01", "to": null, "source": "claude-api skill" }
+    { "match": "claude-fable-5*",    "in": 10.0, "out": 50.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-mythos-5*",   "in": 10.0, "out": 50.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13 — limited availability" },
+    { "match": "claude-opus-5*",     "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-opus-4-8*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-opus-4-7*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-opus-4-6*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-opus-4-5*",   "in": 5.0, "out": 25.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-opus-4-1*",   "in": 15.0, "out": 75.0, "from": "2024-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13 — retired, legacy rate" },
+    { "match": "claude-opus-4-0*",   "in": 15.0, "out": 75.0, "from": "2024-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13 — retired, legacy rate" },
+    { "match": "claude-sonnet-5*",   "in": 2.0, "out": 10.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13 — launch introductory $2/$10 is now the standard price; the scheduled 2026-09-01 rise to $3/$15 will not occur" },
+    { "match": "claude-sonnet-4-6*", "in": 3.0, "out": 15.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-sonnet-4-5*", "in": 3.0, "out": 15.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-sonnet-4*",   "in": 3.0, "out": 15.0, "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13 — retired except on Bedrock/Google Cloud" },
+    { "match": "claude-haiku-4-5*",  "in": 1.0, "out": 5.0,  "from": "2025-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13" },
+    { "match": "claude-haiku-3-5*",  "in": 0.8, "out": 4.0,  "from": "2024-01-01", "to": null, "source": "Anthropic pricing table 2026-08-13 — retired except on Bedrock/Google Cloud" }
   ],
   "unpriced": ["<synthetic>"]
 }
