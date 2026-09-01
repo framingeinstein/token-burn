@@ -51,6 +51,14 @@
         <button data-m="cost">Cost $</button>
       </div>
     </div>
+    <div>
+      <div class="l" style="color:var(--muted);font-size:12px;margin-bottom:5px">source</div>
+      <div class="toggle" id="sourceToggle">
+        <button data-s="claude" class="on">Claude Code</button>
+        <button data-s="cursor">Cursor</button>
+        <button data-s="combined">Combined</button>
+      </div>
+    </div>
   </div>
 </header>
 
@@ -58,11 +66,14 @@
 <section><h2>Over time (log scale)</h2><div class="hint">tokens/day — log axis spans the small early days and the big recent ones.</div><div id="timeseries"></div></section>
 <section><h2>Top 10 days</h2><div class="hint">your biggest days — and what you were doing.</div><div id="topdays"></div></section>
 <section><h2>By model &amp; by agent</h2><div class="hint">model mix, and main-thread vs sub-agent (parallel) work.</div><div id="models"></div></section>
+<section><h2>Cursor billed usage</h2><div class="hint">daily aggregate usage events from Cursor's dashboard API; no raw events or credentials are retained.</div><div id="cursorBilling"></div></section>
+<section><h2>Cursor local activity</h2><div class="hint">sessions and latest context-window occupancy — activity signals, not billed tokens.</div><div id="cursorActivity"></div></section>
 <footer id="foot"></footer>
 
 <script>
 let DATA = "__DATA_PLACEHOLDER__";
 let METRIC = 'total';
+let SOURCE = 'claude';
 const METRIC_LBL = {total:'total compute touched', generative:'generative tokens', output:'output tokens', cost:'API-equivalent $'};
 
 function metricValue(c, metric) {
@@ -77,6 +88,39 @@ function dayComponents(day) {
   for (const m of Object.values(day.byModel)) for (const k in acc) acc[k] += m[k];
   return acc;
 }
+function metricLabel(){
+  if(METRIC!=='cost') return METRIC_LBL[METRIC];
+  if(SOURCE==='cursor') return 'Cursor charged $';
+  if(SOURCE==='combined') return 'Claude API-equivalent + Cursor charged $';
+  return 'Claude API-equivalent $';
+}
+function emptyDay(date){ return {date,events:0,msgs:0,byModel:{},mainVsSub:{main:{in:0,out:0,cc:0,cr:0,cost_usd:0},sub:{in:0,out:0,cc:0,cr:0,cost_usd:0}},topProjects:[],sampleSessions:[]}; }
+function cursorDays(){
+  return ((DATA.cursor||{}).billed||{}).days||[];
+}
+function combinedDays(){
+  const byDate={};
+  for(const [source,sourceDays] of [['Claude',DATA.days],['Cursor',cursorDays()]]){
+    for(const sourceDay of sourceDays){
+      const day=byDate[sourceDay.date]||(byDate[sourceDay.date]=emptyDay(sourceDay.date));
+      day.events+=(sourceDay.events||0); day.msgs+=(sourceDay.msgs||0);
+      for(const [model,comp] of Object.entries(sourceDay.byModel||{})){
+        const label=`${source} · ${model}`;
+        const dest=day.byModel[label]||(day.byModel[label]={in:0,out:0,cc:0,cr:0,cost_usd:0});
+        for(const k of ['in','out','cc','cr','cost_usd']) dest[k]+=(comp[k]||0);
+      }
+      if(sourceDay.topProjects) day.topProjects=sourceDay.topProjects;
+      if(sourceDay.sampleSessions) day.sampleSessions=sourceDay.sampleSessions;
+      if(sourceDay.mainVsSub) day.mainVsSub=sourceDay.mainVsSub;
+    }
+  }
+  return Object.values(byDate).sort((a,b)=>a.date.localeCompare(b.date));
+}
+function activeDays(){
+  if(SOURCE==='cursor') return cursorDays();
+  if(SOURCE==='combined') return combinedDays();
+  return DATA.days;
+}
 function fmtTok(n){ n=Math.round(n);
   if(n>=1e9) return (n/1e9).toFixed(2)+'B';
   if(n>=1e6) return (n/1e6).toFixed(1)+'M';
@@ -87,7 +131,7 @@ const esc = s => (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt
 
 // ---------- heatmap ----------
 function drawHeatmap(){
-  const days = DATA.days; if(!days.length){document.getElementById('heatmap').innerHTML='';return;}
+  const days = activeDays(); if(!days.length){document.getElementById('heatmap').innerHTML='';return;}
   const byDate = {}; days.forEach(d=>byDate[d.date]=d);
   const dt = s => new Date(s+'T00:00:00');
   const start = dt(days[0].date), end = dt(days[days.length-1].date);
@@ -126,7 +170,7 @@ function drawHeatmap(){
 
 // ---------- time series (log) ----------
 function drawTimeseries(){
-  const days=DATA.days; const host=document.getElementById('timeseries');
+  const days=activeDays(); const host=document.getElementById('timeseries');
   if(days.length<2){host.innerHTML='';return;}
   const pts=days.map(d=>({date:new Date(d.date+'T00:00:00'), v:Math.max(1,dayVal(d))}));
   const W=920,H=300,L=54,R=16,T=14,B=28;
@@ -139,9 +183,10 @@ function drawTimeseries(){
   for(let p=lo;p<=hi;p++){ const y=Y(Math.pow(10,p));
     grid+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--line)"/>`;
     ax+=`<text x="${L-8}" y="${y+3}" text-anchor="end" font-size="10" fill="var(--muted)">${fmtVal(Math.pow(10,p))}</text>`; }
-  // x labels: ~6 ticks
-  let xl=''; const n=days.length, step=Math.max(1,Math.floor(n/6));
-  for(let i=0;i<n;i+=step){ const x=X(pts[i].date.getTime());
+  // x labels: first + last are mandatory, with ~5 evenly spaced interior ticks
+  let xl=''; const n=days.length, ticks=new Set([0,n-1]);
+  for(let i=1;i<6;i++) ticks.add(Math.round(i*(n-1)/6));
+  for(const i of [...ticks].sort((a,b)=>a-b)){ const x=X(pts[i].date.getTime());
     xl+=`<text x="${x}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--muted)">${days[i].date.slice(5)}</text>`; }
   const line=pts.map((p,i)=>`${i?'L':'M'}${X(p.date.getTime()).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(' ');
   const dots=pts.map(p=>`<circle cx="${X(p.date.getTime()).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.2" fill="var(--navy)"><title>${p.date.toISOString().slice(0,10)}: ${fmtVal(p.v)}</title></circle>`).join('');
@@ -150,7 +195,7 @@ function drawTimeseries(){
 
 // ---------- top 10 days ----------
 function drawTopDays(){
-  const top=[...DATA.days].sort((a,b)=>dayVal(b)-dayVal(a)).slice(0,10);
+  const top=[...activeDays()].sort((a,b)=>dayVal(b)-dayVal(a)).slice(0,10);
   let rows='';
   for(const d of top){
     const projs=(d.topProjects||[]).slice(0,3).map(p=>`<span class="proj">${esc(p.project)}</span>`).join(', ');
@@ -159,11 +204,11 @@ function drawTopDays(){
       <td class="did">${projs}${ses?` <span class="ses">— ${ses}</span>`:''}</td></tr>`;
   }
   document.getElementById('topdays').innerHTML=
-    `<table><thead><tr><th>Date</th><th class="num">${esc(METRIC_LBL[METRIC])}</th><th>what I did</th></tr></thead><tbody>${rows}</tbody></table>`;
+    `<table><thead><tr><th>Date</th><th class="num">${esc(metricLabel())}</th><th>what I did</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 // ---------- by model & by agent ----------
-function aggBy(getter){ const acc={}; for(const d of DATA.days){ for(const [k,c] of Object.entries(getter(d))){
+function aggBy(getter){ const acc={}; for(const d of activeDays()){ for(const [k,c] of Object.entries(getter(d)||{})){
   acc[k]=(acc[k]||0)+metricValue(c, METRIC);} } return acc; }
 function barRow(label,val,total,W,color){
   const w=total?Math.max(1,(val/total)*(W-150)):0; const pct=total?Math.round(100*val/total):0;
@@ -175,33 +220,71 @@ function barRow(label,val,total,W,color){
 function drawModels(){
   const W=620;
   const models=aggBy(d=>d.byModel);
-  const order=['opus','sonnet','haiku'].filter(m=>models[m]).concat(Object.keys(models).filter(m=>!['opus','sonnet','haiku'].includes(m)));
+  const preferred=['fable','mythos','opus','sonnet','haiku'];
+  const order=preferred.filter(m=>models[m]).concat(Object.keys(models).filter(m=>!preferred.includes(m)).sort());
   const mTot=Object.values(models).reduce((a,b)=>a+b,0);
-  const palette={opus:'#1B2A4A',sonnet:'#3a6ea5',haiku:'#8FB339',other:'#b0b7c3'};
+  const palette={fable:'#6b4c9a',mythos:'#b56b2f',opus:'#1B2A4A',sonnet:'#3a6ea5',haiku:'#8FB339',other:'#b0b7c3'};
   let html='<div style="margin-bottom:14px"><div style="color:var(--muted);font-size:12px;margin-bottom:4px">by model</div>';
   for(const m of order) html+=barRow(m, models[m], mTot, W, palette[m]||palette.other);
   html+='</div>';
   const av=aggBy(d=>d.mainVsSub); const aTot=(av.main||0)+(av.sub||0);
-  html+='<div><div style="color:var(--muted);font-size:12px;margin-bottom:4px">main thread vs sub-agents</div>';
-  html+=barRow('main', av.main||0, aTot, W, '#1B2A4A');
-  html+=barRow('sub-agents', av.sub||0, aTot, W, '#F0A500');
-  html+='</div>';
+  if(aTot){
+    html+='<div><div style="color:var(--muted);font-size:12px;margin-bottom:4px">main thread vs sub-agents</div>';
+    html+=barRow('main', av.main||0, aTot, W, '#1B2A4A');
+    html+=barRow('sub-agents', av.sub||0, aTot, W, '#F0A500');
+    html+='</div>';
+  }
   document.getElementById('models').innerHTML=html;
+}
+
+function drawCursorActivity(){
+  const host=document.getElementById('cursorActivity');
+  const local=((DATA.cursor||{}).local||{});
+  if(local.status!=='ok'){
+    host.innerHTML=`<div style="color:var(--muted)">${esc(local.reason||'Cursor local activity unavailable.')}</div>`;
+    return;
+  }
+  const models={};
+  for(const day of local.days||[]) for(const [model,v] of Object.entries(day.byModel||{})){
+    const acc=models[model]||(models[model]={sessions:0,context_tokens:0});
+    acc.sessions+=v.sessions||0; acc.context_tokens+=v.context_tokens||0;
+  }
+  const rows=Object.entries(models).sort((a,b)=>b[1].sessions-a[1].sessions).map(([model,v])=>
+    `<tr><td>${esc(model)}</td><td class="num">${v.sessions.toLocaleString()}</td><td class="num">${fmtTok(v.context_tokens)}</td></tr>`).join('');
+  host.innerHTML=`<div style="margin-bottom:10px;color:var(--ink)"><strong>${local.totals.sessions.toLocaleString()}</strong> sessions · <strong>${fmtTok(local.totals.context_tokens)}</strong> latest context occupancy</div>
+    <table><thead><tr><th>Model</th><th class="num">Sessions</th><th class="num">Context occupancy</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function drawCursorBilling(){
+  const host=document.getElementById('cursorBilling');
+  const billed=((DATA.cursor||{}).billed||{});
+  if(billed.status!=='ok'){
+    host.innerHTML=`<div style="color:var(--muted)">${esc(billed.reason||'Cursor billed usage unavailable.')} Run <code>python3 cursor_usage.py</code> after configuring the session token.</div>`;
+    return;
+  }
+  const t=billed.totals;
+  host.innerHTML=`<div style="display:flex;gap:32px;flex-wrap:wrap">
+    <div><strong>${t.events.toLocaleString()}</strong><div style="color:var(--muted);font-size:12px">usage events</div></div>
+    <div><strong>${t.included_events.toLocaleString()}</strong><div style="color:var(--muted);font-size:12px">included events</div></div>
+    <div><strong>${t.charged_events.toLocaleString()}</strong><div style="color:var(--muted);font-size:12px">charged events</div></div>
+    <div><strong>$${t.cost_usd.toFixed(2)}</strong><div style="color:var(--muted);font-size:12px">chargedCents total</div></div>
+  </div>`;
 }
 
 // ---------- header + wiring ----------
 function drawHeader(){
-  const grand=DATA.days.reduce((a,d)=>a+dayVal(d),0);
+  const days=activeDays();
+  const grand=days.reduce((a,d)=>a+dayVal(d),0);
   document.getElementById('totalVal').textContent=fmtVal(grand);
-  document.getElementById('totalLbl').textContent=METRIC_LBL[METRIC]+' · all time';
+  document.getElementById('totalLbl').textContent=metricLabel()+' · all time';
   const m=DATA.meta;
+  const sourceName={claude:'Claude Code',cursor:'Cursor billed',combined:'Claude + Cursor'}[SOURCE];
   document.getElementById('subtitle').textContent=
-    `${DATA.days.length} active days · tz ${m.tz} · ${m.unique_messages.toLocaleString()} messages (deduped from ${m.assistant_events.toLocaleString()})`;
-  document.getElementById('heatHint').textContent='each cell = one day, shaded by '+METRIC_LBL[METRIC]+'.';
+    `${sourceName} · ${days.length} active days · tz ${m.tz}`+(SOURCE==='claude'?` · ${m.unique_messages.toLocaleString()} messages (deduped from ${m.assistant_events.toLocaleString()})`:'')+(SOURCE==='cursor'&&((DATA.cursor||{}).billed||{}).status!=='ok'?' · billed usage not configured':'');
+  document.getElementById('heatHint').textContent='each cell = one day, shaded by '+metricLabel()+'.';
   document.getElementById('foot').textContent=
-    `Generated from ~/.claude/projects logs · deduped by message.id · cost at API-equivalent rates (Opus $5/$25, cache-read 0.10×). Local & private.`;
+    `Claude: ~/.claude/projects, deduped by message.id, API-equivalent cost. Cursor: local activity plus daily aggregate usage events; Cursor cost uses chargedCents. Raw Cursor events and credentials are never stored.`;
 }
-function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); }
+function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); drawCursorBilling(); drawCursorActivity(); }
 
 document.getElementById('toggle').addEventListener('click', e=>{
   const b=e.target.closest('button'); if(!b) return;
@@ -209,18 +292,29 @@ document.getElementById('toggle').addEventListener('click', e=>{
   [...document.querySelectorAll('#toggle button')].forEach(x=>x.classList.toggle('on', x===b));
   rerender();
 });
+document.getElementById('sourceToggle').addEventListener('click', e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  SOURCE=b.dataset.s;
+  [...document.querySelectorAll('#sourceToggle button')].forEach(x=>x.classList.toggle('on', x===b));
+  rerender();
+});
 
 async function boot(){
   try {
     if (typeof DATA === "string") {          // not injected by build.sh → live server mode
-      DATA = await (await fetch("/api/data")).json();
+      DATA = await (await fetch("/api/data", {cache:"no-store"})).json();
     }
   } catch (e) {
     document.getElementById("subtitle").textContent =
       "Could not load /api/data — is the server running? (" + e + ")";
     return;
   }
-  if (DATA && DATA.days && DATA.days.length) {
+  const hasClaude=DATA&&DATA.days&&DATA.days.length;
+  const hasCursor=DATA&&DATA.cursor&&(
+    (((DATA.cursor.billed||{}).days)||[]).length||
+    (((DATA.cursor.local||{}).days)||[]).length
+  );
+  if (hasClaude || hasCursor) {
     rerender();
   } else {
     document.getElementById("subtitle").textContent =

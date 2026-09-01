@@ -1,6 +1,12 @@
 # tests/test_serve.py
+import json
+import threading
+from functools import partial
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from serve import choose_port, build_payload
+from urllib.request import urlopen
+
+from serve import Handler, choose_port, build_payload
 
 def test_choose_port_returns_start_when_free():
     assert choose_port(8799, 20, is_free=lambda p: True) == 8799
@@ -15,7 +21,33 @@ def test_choose_port_none_when_all_busy():
 def test_build_payload_assembles_from_ledger_and_logs(tmp_path):
     fixtures = Path(__file__).parent / "fixtures"
     cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": fixtures,
-           "tz": "UTC", "today": "2026-05-21"}
+           "tz": "UTC", "today": "2026-05-21",
+           "cursor_db": str(tmp_path / "missing.vscdb"),
+           "cursor_ledger": str(tmp_path / "missing.jsonl")}
     payload = build_payload(cfg)
     assert "meta" in payload and "days" in payload
     assert payload["days"][0]["date"] == "2026-05-21"
+    assert payload["cursor"]["local"]["status"] == "unavailable"
+    assert payload["cursor"]["billed"]["status"] == "unavailable"
+
+
+def test_dashboard_and_api_disable_http_caching(tmp_path):
+    fixtures = Path(__file__).parent / "fixtures"
+    cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": fixtures,
+           "tz": "UTC", "today": "2026-05-21",
+           "cursor_db": str(tmp_path / "missing.vscdb"),
+           "cursor_ledger": str(tmp_path / "missing.jsonl")}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, cfg=cfg))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        with urlopen(base + "/") as response:
+            assert response.headers["Cache-Control"] == "no-store"
+        with urlopen(base + "/api/data") as response:
+            assert response.headers["Cache-Control"] == "no-store"
+            assert json.load(response)["days"][-1]["date"] == "2026-05-21"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

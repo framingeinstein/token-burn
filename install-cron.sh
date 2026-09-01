@@ -9,7 +9,10 @@ LINE="0 9 * * * cd '$DIR' && '$PY' snapshot.py >> '$DIR/snapshot.log' 2>&1"
 # repo, then append ours. `|| true` keeps `set -e` from aborting when crontab is empty or
 # grep matches nothing — otherwise an empty pipe to `crontab -` would wipe the crontab.
 existing="$(crontab -l 2>/dev/null || true)"
-filtered="$(printf '%s\n' "$existing" | grep -vF "# token-burn snapshot" | grep -vF "$DIR/snapshot.py" | grep -vF "cd '$DIR' &&" || true)"
+# Filter on token-burn's own marker/script name as well as this DIR, so an entry left
+# behind by a PREVIOUS location of the repo is replaced rather than duplicated. A filter
+# keyed only on the current DIR can't recognise the repo's past paths.
+filtered="$(printf '%s\n' "$existing" | grep -vF "# token-burn snapshot" | grep -vE "token-burn/snapshot\\.py|token-burn' &&" | grep -vF "$DIR/snapshot.py" | grep -vF "cd '$DIR' &&" || true)"
 { [ -n "$filtered" ] && printf '%s\n' "$filtered" ; echo "# token-burn snapshot" ; echo "$LINE" ; } | crontab -
 echo "installed daily cron (09:00 local):"
 echo "  $LINE"

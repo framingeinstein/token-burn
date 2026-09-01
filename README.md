@@ -4,8 +4,9 @@ A personal, **local, offline** dashboard of my Claude Code token usage over time
 loop for seeing and improving how I use AI (inspired by Nate B. Jones' "token burn dashboard",
 but reading exact numbers from Claude Code's own logs instead of approximating).
 
-It parses `~/.claude/projects/**/*.jsonl`, deduplicates by assistant `message.id`, and renders
-four views from a single self-contained HTML file.
+It parses `~/.claude/projects/**/*.jsonl`, deduplicates by assistant `message.id`, reads local
+Cursor activity, and can capture Cursor's billed usage into daily rollups. The dashboard renders
+all sources from a single self-contained HTML file.
 
 ## Use
 
@@ -14,25 +15,53 @@ four views from a single self-contained HTML file.
 ./build.sh --tz America/Los_Angeles   # bucket days in a different timezone
 ```
 
-`build.sh` runs `parse.py` (writes `data.json`), inlines that JSON into `dashboard.html`, and
-writes a fully self-contained `out/dashboard.html` you can open by double-click — no server, no
-network, works offline.
+`build.sh` assembles the Claude ledger plus live today and the available Cursor rollups, writes
+`data.json`, inlines that JSON into `dashboard.html`, and writes a fully self-contained
+`out/dashboard.html` you can open by double-click — no server, no network, works offline.
 
 ### parse.py flags
 - `--root` (default `~/.claude/projects`) — log directory to scan
 - `--tz` (default: your local IANA timezone) — day-bucketing timezone
 - `--out` (default `data.json`)
 
-## The four views (all driven by the metric toggle)
+## Dashboard views
 
 - **Daily burn** — GitHub-style calendar heatmap, shaded by the selected metric.
 - **Over time (log scale)** — tokens/day on a log axis (handles the few-million → ~billion range).
 - **Top 10 days** — your biggest days *and what you were doing* (projects + session titles).
 - **By model & by agent** — Opus/Sonnet/Haiku split, plus main-thread vs sub-agent (parallel) work.
+- **Cursor local activity** — sessions and context-window occupancy by model. These are activity
+  signals, not billed token counts.
 
 **Metric toggle:** Total compute (`in+out+cache_create+cache_read`) · Generative (`in+out+cache_create`)
 · Output only · Cost $ (API-equivalent). Metrics 1–3 are computed in the browser; cost is
 precomputed in `parse.py`.
+
+**Source toggle:** Claude Code · Cursor · Combined. Claude cost is API-equivalent; Cursor cost is
+the amount in Cursor's `chargedCents`. Combined cost adds those two explicitly labeled measures.
+
+## Cursor usage
+
+Cursor's local database records sessions, selected models, and current context-window occupancy,
+but its local token-count fields are zero. Exact billed tokens and charges therefore come from
+Cursor's unofficial personal dashboard endpoint.
+
+1. Sign in at `https://cursor.com/dashboard/usage`.
+2. In browser developer tools, copy the `WorkosCursorSessionToken` cookie.
+3. Store it locally (the file is outside this repo and should be readable only by you):
+
+```bash
+mkdir -p ~/.config/token-burn
+printf '%s' 'PASTE_COOKIE_VALUE' > ~/.config/token-burn/cursor-session-token
+chmod 600 ~/.config/token-burn/cursor-session-token
+python3 cursor_usage.py
+```
+
+`cursor_usage.py` resumes from the latest captured day, fetches paginated events, and appends only
+daily aggregate model/token/cost rollups to `cursor-snapshots.jsonl`. It never stores the cookie or
+raw API events. Because the endpoint is unofficial, authentication or response shapes may change.
+`snapshot.py` performs the same incremental Cursor capture during the daily cron run when the token
+file exists; Claude snapshots continue even if Cursor capture fails.
 
 ## The dedup gotcha (why this is accurate)
 
@@ -66,7 +95,8 @@ retention, a live HTTP server, and a self-contained build that includes today's 
 
 ### Commands
 
-- **`python3 snapshot.py`** — freezes each completed day into `snapshots.jsonl` (append-only).
+- **`python3 snapshot.py`** — freezes each completed Claude day into `snapshots.jsonl` and, when
+  configured, refreshes `cursor-snapshots.jsonl` (both append-only).
   The first run seeds the full span still on disk; later runs catch up from the last recorded day.
   Run it daily.
 

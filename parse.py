@@ -62,6 +62,10 @@ def dedupe_messages(raw_text):
 
 def model_class(model):
     m = (model or "").lower()
+    if "fable" in m:
+        return "fable"
+    if "mythos" in m:
+        return "mythos"
     if "opus" in m:
         return "opus"
     if "sonnet" in m:

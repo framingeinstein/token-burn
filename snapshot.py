@@ -14,6 +14,11 @@ from pathlib import Path
 from parse import day_records, _default_tz_name
 from prices import load_prices
 from ledger import read_ledger, append_day, today_str
+from cursor_usage import (
+    DEFAULT_TOKEN_FILE,
+    capture_usage,
+    token_from_env_or_file,
+)
 
 
 def _prev_day(today):
@@ -53,6 +58,12 @@ def main():
     ap.add_argument("--refinalize", action="store_true",
                     help="re-append fresh lines (latest wins on read) for a rate/parser fix")
     ap.add_argument("--since", default=None, help="floor date YYYY-MM-DD for --refinalize")
+    ap.add_argument(
+        "--cursor-ledger",
+        default=str(Path(__file__).parent / "cursor-snapshots.jsonl"),
+    )
+    ap.add_argument("--cursor-token-file", default=str(DEFAULT_TOKEN_FILE))
+    ap.add_argument("--skip-cursor", action="store_true")
     args = ap.parse_args()
 
     prices = load_prices()
@@ -72,6 +83,25 @@ def main():
         if oldest_log > _next_day(newest_led):
             print(f"  WARNING: gap — oldest log {oldest_log} is past ledger max {newest_led}; "
                   f"days between may have rolled off uncaptured.")
+    if not args.skip_cursor:
+        token = token_from_env_or_file(path=args.cursor_token_file)
+        if token:
+            try:
+                captured = capture_usage(
+                    token, args.cursor_ledger, args.tz,
+                    since=args.since if args.refinalize else None,
+                )
+                print(
+                    f"cursor usage: {captured['events']} events / "
+                    f"{captured['days']} day(s)"
+                )
+            except Exception as exc:
+                print(f"  WARNING: Cursor usage capture failed: {exc}")
+        else:
+            print(
+                "cursor usage: not configured "
+                f"(token file: {args.cursor_token_file})"
+            )
 
 
 if __name__ == "__main__":

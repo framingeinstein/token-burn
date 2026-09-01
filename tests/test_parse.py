@@ -72,6 +72,8 @@ def test_model_class_maps_families():
     assert model_class("claude-opus-4-8") == "opus"
     assert model_class("claude-sonnet-4-6") == "sonnet"
     assert model_class("claude-haiku-4-5-20251001") == "haiku"
+    assert model_class("claude-fable-5") == "fable"
+    assert model_class("claude-mythos-5") == "mythos"
     assert model_class("<synthetic>") == "other"   # was mispriced as sonnet in Phase 1
     assert model_class(None) == "other"
 

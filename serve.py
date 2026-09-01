@@ -18,13 +18,25 @@ from pathlib import Path
 from parse import _default_tz_name
 from prices import load_prices
 from ledger import assemble_rollup, today_str
+from cursor_local import read_cursor_activity
+from cursor_usage import load_cursor_usage
 
 HERE = Path(__file__).parent
+DEFAULT_CURSOR_DB = Path(
+    "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+).expanduser()
 
 
 def build_payload(cfg):
     today = cfg.get("today") or today_str(cfg["tz"])
-    return assemble_rollup(cfg["ledger"], cfg["root"], cfg["tz"], today, prices=load_prices())
+    payload = assemble_rollup(
+        cfg["ledger"], cfg["root"], cfg["tz"], today, prices=load_prices()
+    )
+    payload["cursor"] = {
+        "local": read_cursor_activity(cfg["cursor_db"], cfg["tz"]),
+        "billed": load_cursor_usage(cfg["cursor_ledger"]),
+    }
+    return payload
 
 
 def choose_port(start, tries, is_free):
@@ -52,6 +64,7 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -76,10 +89,19 @@ def main():
     ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--ledger", default=str(HERE / "snapshots.jsonl"))
+    ap.add_argument("--cursor-db", default=str(DEFAULT_CURSOR_DB))
+    ap.add_argument("--cursor-ledger", default=str(HERE / "cursor-snapshots.jsonl"))
     ap.add_argument("--port", type=int, default=8799)
     args = ap.parse_args()
 
-    cfg = {"root": args.root, "tz": args.tz, "ledger": args.ledger, "today": None}
+    cfg = {
+        "root": args.root,
+        "tz": args.tz,
+        "ledger": args.ledger,
+        "cursor_db": args.cursor_db,
+        "cursor_ledger": args.cursor_ledger,
+        "today": None,
+    }
     port = choose_port(args.port, 20, _port_free)
     if port is None:
         raise SystemExit(f"no free port in {args.port}..{args.port + 19}")
