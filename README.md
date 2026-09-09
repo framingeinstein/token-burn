@@ -1,54 +1,136 @@
 # Token Burn
 
-A personal, **local, offline** dashboard of my Claude Code token usage over time — a feedback
-loop for seeing and improving how I use AI (inspired by Nate B. Jones' "token burn dashboard",
-but reading exact numbers from Claude Code's own logs instead of approximating).
+A local, offline dashboard of your **Claude Code** token usage over time — a feedback loop for
+seeing, and improving, how you actually use AI.
 
-It parses `~/.claude/projects/**/*.jsonl`, deduplicates by assistant `message.id`, reads local
-Cursor activity, and can capture Cursor's billed usage into daily rollups. The dashboard renders
-all sources from a single self-contained HTML file.
+It reads exact numbers from Claude Code's own JSONL logs rather than estimating them, and renders
+everything into a single self-contained HTML file. No server required, no account, no network
+call, nothing uploaded. Python 3 standard library only.
 
-## Use
+Inspired by Nate B. Jones' "token burn dashboard" — this one reads the logs instead of
+approximating.
+
+---
+
+## Quick start
 
 ```bash
-./build.sh           # parse ~/.claude logs, build, and open the dashboard
-./build.sh --tz America/Los_Angeles   # bucket days in a different timezone
+git clone https://github.com/framingeinstein/token-burn.git
+cd token-burn
+./build.sh
 ```
 
-`build.sh` assembles the Claude ledger plus live today and the available Cursor rollups, writes
-`data.json`, inlines that JSON into `dashboard.html`, and writes a fully self-contained
-`out/dashboard.html` you can open by double-click — no server, no network, works offline.
+That parses `~/.claude/projects/**/*.jsonl`, writes a fully self-contained `out/dashboard.html`,
+and opens it. Double-click that file any time — it works offline, forever.
 
-### parse.py flags
-- `--root` (default `~/.claude/projects`) — log directory to scan
-- `--tz` (default: your local IANA timezone) — day-bucketing timezone
-- `--out` (default `data.json`)
+**Your first run only shows the logs still on disk.** Claude Code keeps roughly the last 30 days.
+To build history beyond that, see [Keeping history](#keeping-history) below — the archive grows
+from the day you start.
 
-## Dashboard views
+Requires Python 3.11+. No dependencies.
 
-- **Daily burn** — GitHub-style calendar heatmap, shaded by the selected metric.
-- **Over time (log scale)** — tokens/day on a log axis (handles the few-million → ~billion range).
-- **Top 10 days** — your biggest days *and what you were doing* (projects + session titles).
-- **By model & by agent** — Opus/Sonnet/Haiku split, plus main-thread vs sub-agent (parallel) work.
-- **Cursor local activity** — sessions and context-window occupancy by model. These are activity
-  signals, not billed token counts.
+---
 
-**Metric toggle:** Total compute (`in+out+cache_create+cache_read`) · Generative (`in+out+cache_create`)
-· Output only · Cost $ (API-equivalent). Metrics 1–3 are computed in the browser; cost is
-precomputed in `parse.py`.
+## What you get
 
-**Source toggle:** Claude Code · Cursor · Combined. Claude cost is API-equivalent; Cursor cost is
-the amount in Cursor's `chargedCents`. Combined cost adds those two explicitly labeled measures.
+- **Daily burn** — a GitHub-style calendar heatmap, shaded by the metric you pick.
+- **Over time (log scale)** — tokens per day on a log axis, which is what it takes to show a range
+  from a few million to a billion on one chart.
+- **Top 10 days** — your biggest days *and what you were doing on them* (projects and session
+  titles).
+- **By model & by agent** — the Opus/Sonnet/Haiku split, plus main-thread versus sub-agent work,
+  which is usually the surprising one.
+- **Cursor activity** — optional; sessions and context-window occupancy by model.
 
-## Cursor usage
+**Metric toggle:** Total compute (`in + out + cache_create + cache_read`) · Generative
+(`in + out + cache_create`) · Output only · Cost $ (API-equivalent).
 
-Cursor's local database records sessions, selected models, and current context-window occupancy,
-but its local token-count fields are zero. Exact billed tokens and charges therefore come from
-Cursor's unofficial personal dashboard endpoint.
+**Source toggle:** Claude Code · Cursor · Combined.
+
+---
+
+## Why the numbers are right: the dedup gotcha
+
+Claude Code writes **one JSONL line per content block** of an assistant turn — a `thinking` line, a
+`text` line, one per `tool_use` — and stamps *every one of them* with the same message-level
+`usage` object.
+
+Summing raw log lines therefore double-counts by roughly **2×**.
+
+`parse.py` deduplicates by assistant `message.id`, keeping the occurrence with the largest output.
+As a sanity check it prints `events -> unique msgs`; a ratio near 2× is expected and correct. This
+is the single most important detail in the project — a dashboard that gets it wrong will confidently
+tell you that you spend twice what you do. See
+[`docs/superpowers/specs/2026-06-05-token-burn-dashboard-design.md`](docs/superpowers/specs/2026-06-05-token-burn-dashboard-design.md).
+
+## Cost
+
+Cost is **API-equivalent**: what the same tokens would have cost at published API rates. If you are
+on a Claude subscription this is not your bill — it is a measure of the compute you consumed, which
+is the number worth watching.
+
+Rates live in `prices.json` as a dated table (model id × date range, with a source). Cost is
+**frozen at capture time**, so correcting a rate never silently rewrites your history; re-price
+deliberately with `snapshot.py --refinalize --since YYYY-MM-DD`. Models with no known rate are
+counted as `$0` and reported in `meta.unpriced_models` rather than being guessed at.
+
+---
+
+## Keeping history
+
+Claude Code's logs expire (~30 days). To keep a permanent record, `snapshot.py` freezes each
+completed day into an append-only local archive, `snapshots.jsonl`.
+
+```bash
+python3 snapshot.py     # freeze completed days; run daily
+./install-cron.sh       # or install a 09:00 daily cron entry that does it for you
+```
+
+The first run seeds everything still on disk; later runs catch up from the last recorded day.
+Finalized days are immutable — only *today* is ever parsed live.
+
+**Your archive is yours.** `snapshots.jsonl` is gitignored and never leaves your machine. It
+contains your project names and session titles, so treat it the way you would the logs it came
+from: do not commit it, and do not paste it into an issue.
+
+### Live server (optional)
+
+```bash
+python3 serve.py        # http://127.0.0.1:8799
+```
+
+Serves the dashboard with today's data merged live on every load: `/api/data` (archive + live
+today) and `/healthz`. Read-only — capture stays with `snapshot.py`. If the port is taken it
+increments to the next free one and prints where it landed.
+
+On macOS, `./install-launchd.sh` supervises that server as a LaunchAgent
+(`com.token-burn.serve`) so it starts at login and restarts if it dies; `--uninstall` removes it.
+Logs land in `~/.config/token-burn/serve.{out,err}`. After editing `serve.py` or `dashboard.html`,
+restart it with `launchctl kickstart -k gui/$UID/com.token-burn.serve`.
+
+---
+
+## Cursor (optional)
+
+Cursor support is entirely optional — skip this section and everything else works.
+
+**Local activity.** Cursor's local database records sessions, selected models, and current
+context-window occupancy. Its local token-count fields are zero, so these are *activity signals,
+not billed tokens*. The database path defaults to macOS
+(`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`); elsewhere, pass
+`--cursor-db`. If it is missing, the dashboard just reports Cursor as unavailable.
+
+**Billed usage.** Exact billed tokens and charges come from Cursor's personal usage dashboard
+endpoint, which requires your session cookie.
+
+> ⚠️ **This endpoint is unofficial.** It is not a documented, supported API: authentication and
+> response shapes can change without notice, and this integration may break. The
+> `WorkosCursorSessionToken` cookie **is a credential for your Cursor account** — treat it like a
+> password.
 
 1. Sign in at `https://cursor.com/dashboard/usage`.
-2. In browser developer tools, copy the `WorkosCursorSessionToken` cookie.
-3. Store it locally (the file is outside this repo and should be readable only by you):
+2. Copy the `WorkosCursorSessionToken` cookie from your browser's developer tools.
+3. Store it outside the repo, readable only by you:
 
 ```bash
 mkdir -p ~/.config/token-burn
@@ -57,75 +139,65 @@ chmod 600 ~/.config/token-burn/cursor-session-token
 python3 cursor_usage.py
 ```
 
-`cursor_usage.py` resumes from the latest captured day, fetches paginated events, and appends only
-daily aggregate model/token/cost rollups to `cursor-snapshots.jsonl`. It never stores the cookie or
-raw API events. Because the endpoint is unofficial, authentication or response shapes may change.
-`snapshot.py` performs the same incremental Cursor capture during the daily cron run when the token
-file exists; Claude snapshots continue even if Cursor capture fails.
+`cursor_usage.py` resumes from the last captured day, fetches paginated events, and appends only
+daily aggregate rollups to `cursor-snapshots.jsonl` (also gitignored). It never stores the cookie
+or the raw API events. `snapshot.py` does the same capture during the daily run when the token file
+exists; Claude snapshots continue even if Cursor capture fails.
 
-## The dedup gotcha (why this is accurate)
+Claude cost is API-equivalent; Cursor cost is the amount in Cursor's own `chargedCents`. "Combined"
+adds those two explicitly different measures — read it as an order of magnitude, not a bill.
 
-Claude Code writes **one JSONL line per content block** of an assistant turn (a `thinking` line,
-a `text` line, one per `tool_use`), each stamped with the *same* message-level `usage`. Summing
-raw lines therefore double-counts ~2×. `parse.py` dedupes by `message.id` (keeping the max-output
-occurrence). Sanity check: the parse output prints `events -> unique msgs` — expect roughly **2×**.
-See `docs/superpowers/specs/2026-06-05-token-burn-dashboard-design.md`.
-
-## Cost rates
-
-API-equivalent, validated 2026-06-05: Opus `$5/$25` per MTok, Sonnet `$3/$15`, Haiku `$1/$5`;
-cache write `1.25×` input, cache read `0.10×` input. *(Future option: weight the `ephemeral_1h`
-cache-write portion at 2× — currently flat 1.25× to match the companion cost deck.)*
+---
 
 ## Privacy
 
-Everything stays on your machine. Full prompt/title detail is kept (it's private). Nothing is
-uploaded. `data.json` and `out/` are gitignored.
+Everything stays on your machine. Nothing is uploaded, and there is no telemetry.
 
-## Tests
+Full prompt and session-title detail is deliberately kept, because "what were you doing on your
+most expensive day" is the whole point of the tool. That also means the generated artifacts are
+sensitive. `snapshots.jsonl`, `cursor-snapshots.jsonl`, `data.json`, and `out/` are all gitignored
+for that reason — check before you share a build, a screenshot, or a snapshot file.
 
-```bash
-python3 -m pytest tests/ -v   # parser unit + integration tests
-```
+---
 
-## Phase 2 — durable snapshots + server
+## Platform support
 
-Phase 2 adds a committed snapshot archive so daily history survives Claude Code's ~30-day log
-retention, a live HTTP server, and a self-contained build that includes today's data.
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Claude parsing, `build.sh`, `serve.py` | ✅ | ✅ | untested |
+| `install-cron.sh` | ✅ | ✅ | — |
+| `install-launchd.sh` | ✅ | — | — |
+| Cursor local activity | ✅ | `--cursor-db` | `--cursor-db` |
 
-### Commands
+`build.sh` opens the result automatically on macOS; elsewhere it prints the path.
 
-- **`python3 snapshot.py`** — freezes each completed Claude day into `snapshots.jsonl` and, when
-  configured, refreshes `cursor-snapshots.jsonl` (both append-only).
-  The first run seeds the full span still on disk; later runs catch up from the last recorded day.
-  Run it daily.
+---
 
-- **`./install-cron.sh`** — installs a daily 09:00 cron entry that runs the snapshotter and
-  appends output to `snapshot.log`. Idempotent — safe to run again after updates. View the
-  installed entry with `crontab -l`.
-
-- **`python3 serve.py`** — serves the live dashboard at the `http://127.0.0.1:<port>` printed on
-  startup (defaults to 8799; auto-increments to the next free port if taken).
-  - `/api/data` — merges the frozen `snapshots.jsonl` archive with a live parse of today's logs.
-  - `/healthz` — health check.
-
-- **`./install-launchd.sh`** — installs `serve.py` as a macOS LaunchAgent
-  (`com.token-burn.serve`) so the dashboard is always up at `http://127.0.0.1:8799`: starts at
-  login, restarted by launchd if it dies. Idempotent — re-run after moving the repo. Logs land in
-  `~/.config/token-burn/serve.{out,err}`. Restart after editing `serve.py` / `dashboard.html`
-  with `launchctl kickstart -k gui/$UID/com.token-burn.serve`; `--uninstall` removes it. Refuses
-  to install if an un-supervised server already answers on 8799 (it would otherwise be pushed to
-  8800 silently).
-
-- **`./build.sh`** — writes a fully self-contained `out/dashboard.html` (frozen archive + live
-  today inlined) openable by double-click, no server needed.
-
-### The archive
-
-`snapshots.jsonl` is the committed, append-only archive — it's the durable history that survives
-log expiry. `prices.json` is the dated price table; cost is **frozen at capture time**. After a
-rate correction, re-price history with:
+## Development
 
 ```bash
-python3 snapshot.py --refinalize --since YYYY-MM-DD
+pip install pytest
+python3 -m pytest tests/ -v
 ```
+
+The tool itself is standard library only; `pytest` is the sole development dependency. Tests run on
+Python 3.11–3.13 in CI.
+
+### Layout
+
+| File | Role |
+|---|---|
+| `parse.py` | logs → per-day rollups (owns the `message.id` dedup) |
+| `ledger.py` | archive read/append + merge of frozen history with live today |
+| `prices.py` / `prices.json` | dated rate table; cost frozen at capture |
+| `snapshot.py` | daily capture entry point (idempotent, catches up) |
+| `serve.py` | stdlib HTTP server: `/`, `/api/data`, `/healthz` |
+| `build.sh` | self-contained offline `out/dashboard.html` |
+| `dashboard.html` | the UI; auto-detects inlined data vs live `fetch` |
+| `cursor_local.py` / `cursor_usage.py` | optional Cursor activity and billed usage |
+
+Design notes and implementation plans are in [`docs/superpowers/`](docs/superpowers/).
+
+## License
+
+[MIT](LICENSE)
