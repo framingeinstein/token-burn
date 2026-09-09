@@ -7,3 +7,7 @@ __pycache__/
 .DS_Store
 cursor-session-token
 .env
+# Your usage archives are yours: local-only, never committed.
+# snapshot.py (or the daily cron) rebuilds/extends them on your machine.
+snapshots.jsonl
+cursor-snapshots.jsonl
