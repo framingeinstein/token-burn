@@ -17,15 +17,21 @@ approximating.
 ```bash
 git clone https://github.com/framingeinstein/token-burn.git
 cd token-burn
-./build.sh
+python3 snapshot.py    # capture the history sitting in your logs right now
+./build.sh             # build and open the dashboard
 ```
 
-That parses `~/.claude/projects/**/*.jsonl`, writes a fully self-contained `out/dashboard.html`,
-and opens it. Double-click that file any time — it works offline, forever.
+`snapshot.py` reads `~/.claude/projects/**/*.jsonl` and freezes every completed day into a local
+archive. `build.sh` turns that archive — plus today, parsed live — into a fully self-contained
+`out/dashboard.html`. Double-click that file any time; it works offline, forever.
 
-**Your first run only shows the logs still on disk.** Claude Code keeps roughly the last 30 days.
-To build history beyond that, see [Keeping history](#keeping-history) below — the archive grows
-from the day you start.
+**Run `snapshot.py` first.** `build.sh` on its own only parses *today* and reads the rest from the
+archive, so without that first capture a fresh clone shows a single day. The first `snapshot.py`
+run backfills everything still on disk at once.
+
+**That backfill is your starting point, not your whole history.** Claude Code keeps roughly the
+last 30 days of logs; days older than that are already gone. From here the archive only grows, so
+run `snapshot.py` daily — see [Keeping history](#keeping-history).
 
 Requires Python 3.11+. No dependencies.
 
