@@ -109,6 +109,14 @@ retention, a live HTTP server, and a self-contained build that includes today's 
   - `/api/data` — merges the frozen `snapshots.jsonl` archive with a live parse of today's logs.
   - `/healthz` — health check.
 
+- **`./install-launchd.sh`** — installs `serve.py` as a macOS LaunchAgent
+  (`com.token-burn.serve`) so the dashboard is always up at `http://127.0.0.1:8799`: starts at
+  login, restarted by launchd if it dies. Idempotent — re-run after moving the repo. Logs land in
+  `~/.config/token-burn/serve.{out,err}`. Restart after editing `serve.py` / `dashboard.html`
+  with `launchctl kickstart -k gui/$UID/com.token-burn.serve`; `--uninstall` removes it. Refuses
+  to install if an un-supervised server already answers on 8799 (it would otherwise be pushed to
+  8800 silently).
+
 - **`./build.sh`** — writes a fully self-contained `out/dashboard.html` (frozen archive + live
   today inlined) openable by double-click, no server needed.
 
