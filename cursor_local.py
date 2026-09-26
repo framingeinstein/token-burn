@@ -7,6 +7,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
+# Half-open key range == prefix 'composerData:' (';' is the next ASCII char after ':').
+# Unlike LIKE (case-insensitive, so it can't use the key index) this is an index SEARCH:
+# Cursor's state.vscdb runs to many GB, and a full scan made every dashboard load ~20s.
+COMPOSER_QUERY = (
+    "SELECT value FROM cursorDiskKV "
+    "WHERE key >= 'composerData:' AND key < 'composerData;'"
+)
+
+
 def _unavailable(reason):
     return {
         "status": "unavailable",
@@ -24,9 +33,7 @@ def read_cursor_activity(db_path, tz_name):
 
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        rows = con.execute(
-            "SELECT value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
-        ).fetchall()
+        rows = con.execute(COMPOSER_QUERY).fetchall()
         con.close()
     except (OSError, sqlite3.Error) as exc:
         return _unavailable(f"Cursor state database could not be read: {exc}")
