@@ -11,7 +11,8 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from parse import day_records, default_roots, _default_tz_name
+from parse import (DEFAULT_FACTORY_ROOT, day_records, default_roots, factory_day_records,
+                   _default_tz_name)
 from prices import load_prices
 from ledger import read_ledger, append_day, today_str
 from cursor_usage import (
@@ -31,9 +32,10 @@ def _next_day(d):
     return (date(y, m, dd) + timedelta(days=1)).isoformat()
 
 
-def run(root, tz_name, ledger_path, prices, today, refinalize=False, since=None):
+def run(root, tz_name, ledger_path, prices, today, refinalize=False, since=None,
+        records=day_records):
     existing = read_ledger(ledger_path)
-    days, meta = day_records(root, tz_name, since=since, until=_prev_day(today), prices=prices)
+    days, meta = records(root, tz_name, since=since, until=_prev_day(today), prices=prices)
     added = 0
     for rec in days:
         d = rec["date"]
@@ -65,6 +67,11 @@ def main():
     )
     ap.add_argument("--cursor-token-file", default=str(DEFAULT_TOKEN_FILE))
     ap.add_argument("--skip-cursor", action="store_true")
+    ap.add_argument("--factory-root", default=str(DEFAULT_FACTORY_ROOT),
+                    help="local mirror of the factory runners' transcript bucket (sync-factory.sh)")
+    ap.add_argument("--factory-ledger",
+                    default=str(Path(__file__).parent / "factory-snapshots.jsonl"))
+    ap.add_argument("--skip-factory", action="store_true")
     args = ap.parse_args()
 
     prices = load_prices()
@@ -86,6 +93,14 @@ def main():
         if oldest_log > _next_day(newest_led):
             print(f"  WARNING: gap — oldest log {oldest_log} is past ledger max {newest_led}; "
                   f"days between may have rolled off uncaptured.")
+    if not args.skip_factory and os.path.isdir(args.factory_root):
+        f_added, _, f_meta, _ = run(args.factory_root, args.tz, args.factory_ledger, prices, today,
+                                    refinalize=args.refinalize, since=since,
+                                    records=factory_day_records)
+        print(f"factory: +{f_added} day(s) from {args.factory_root}; "
+              f"ledger now {len(read_ledger(args.factory_ledger))} day(s)")
+        if f_meta.get("unpriced_models"):
+            print(f"  factory unpriced models (cost=0): {f_meta['unpriced_models']}")
     if not args.skip_cursor:
         token = token_from_env_or_file(path=args.cursor_token_file)
         if token:

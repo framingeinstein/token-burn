@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 DIR="$(pwd)"
 PY="$(command -v python3)"
-LINE="0 9 * * * cd '$DIR' && '$PY' snapshot.py >> '$DIR/snapshot.log' 2>&1"
+LINE="0 9 * * * cd '$DIR' && ./sync-factory.sh >> '$DIR/snapshot.log' 2>&1; '$PY' snapshot.py >> '$DIR/snapshot.log' 2>&1"
 # Read the current crontab (empty if none), strip any prior token-burn entry for THIS
 # repo, then append ours. `|| true` keeps `set -e` from aborting when crontab is empty or
 # grep matches nothing — otherwise an empty pipe to `crontab -` would wipe the crontab.

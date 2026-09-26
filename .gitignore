@@ -11,3 +11,6 @@ cursor-session-token
 # snapshot.py (or the daily cron) rebuilds/extends them on your machine.
 snapshots.jsonl
 cursor-snapshots.jsonl
+factory-snapshots.jsonl
+snapshots.jsonl.bak-*
+.env.factory

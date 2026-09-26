@@ -287,3 +287,14 @@ def test_day_records_single_root_still_accepted(tmp_path):
     _write_session(tmp_path / "a" / "p", "msg_1", out=10)
     days, _ = day_records(str(tmp_path / "a"), "UTC", prices=PRICES)
     assert days[0]["byModel"]["opus"]["out"] == 10
+
+
+def test_day_records_since_skips_files_not_modified_since(tmp_path):
+    import os
+    _write_session(tmp_path / "p", "msg_old", out=10, day="2026-05-21")
+    old = tmp_path / "p" / "msg_old.jsonl"
+    os.utime(old, (0, 0))                                   # last written 1970
+    days, _ = day_records(tmp_path, "UTC", since="2026-05-21", prices=PRICES)
+    assert days == []                                       # skipped by mtime
+    days, _ = day_records(tmp_path, "UTC", prices=PRICES)   # no since => full scan
+    assert days[0]["byModel"]["opus"]["out"] == 10
