@@ -51,3 +51,15 @@ def test_dashboard_and_api_disable_http_caching(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_build_payload_without_root_discovers_every_store(tmp_path, monkeypatch):
+    import serve
+    fixtures = Path(__file__).parent / "fixtures"
+    monkeypatch.setattr(serve, "default_roots", lambda: [fixtures])
+    cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": None,
+           "tz": "UTC", "today": "2026-05-21",
+           "cursor_db": str(tmp_path / "missing.vscdb"),
+           "cursor_ledger": str(tmp_path / "missing.jsonl")}
+    payload = build_payload(cfg)
+    assert payload["days"][0]["date"] == "2026-05-21"

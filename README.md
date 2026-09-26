@@ -21,7 +21,7 @@ python3 snapshot.py    # capture the history sitting in your logs right now
 ./build.sh             # build and open the dashboard
 ```
 
-`snapshot.py` reads `~/.claude/projects/**/*.jsonl` and freezes every completed day into a local
+`snapshot.py` reads `**/*.jsonl` under every Claude Code store — `~/.claude/projects`, each `~/.claude-*/projects` (per-workspace `CLAUDE_CONFIG_DIR` logins), and `$CLAUDE_CONFIG_DIR/projects` — and freezes every completed day into a local
 archive. `build.sh` turns that archive — plus today, parsed live — into a fully self-contained
 `out/dashboard.html`. Double-click that file any time; it works offline, forever.
 
@@ -115,6 +115,28 @@ Logs land in `~/.config/token-burn/serve.{out,err}`. After editing `serve.py` or
 restart it with `launchctl kickstart -k gui/$UID/com.token-burn.serve`.
 
 ---
+
+## Remote runners (optional)
+
+Claude Code running elsewhere — e.g. a fleet of headless `claude -p` runners on
+Cloud Run — never writes to this machine's stores. If those runners upload their
+session JSONL to a bucket laid out as `{runner}/{issue}/{execution}/{session}.jsonl`,
+token-burn can account for them too:
+
+```bash
+cat > .env.factory <<'ENV'          # gitignored
+TOKEN_BURN_FACTORY_BUCKET=gs://your-transcript-bucket
+CLOUDSDK_CONFIG=/path/to/gcloud/config   # optional: a config with read access
+ENV
+./sync-factory.sh                   # incremental mirror -> ~/.token-burn/factory-transcripts
+python3 snapshot.py                 # freezes factory days into factory-snapshots.jsonl
+```
+
+`install-cron.sh` chains the sync before the daily snapshot. Factory usage is
+attributed from the bucket path as `factory:<runner>` (runners share a `/tmp/wt-N`
+cwd, so cwd can't be used), counts each `message.id` once across re-uploaded
+sessions, and lives in its own archive so backfilling it never re-derives your
+local days. The dashboard's "by source" bars split this machine from each runner.
 
 ## Cursor (optional)
 

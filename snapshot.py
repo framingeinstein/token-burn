@@ -11,7 +11,8 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from parse import day_records, _default_tz_name
+from parse import (DEFAULT_FACTORY_ROOT, day_records, default_roots, factory_day_records,
+                   _default_tz_name)
 from prices import load_prices
 from ledger import read_ledger, append_day, today_str
 from cursor_usage import (
@@ -31,9 +32,10 @@ def _next_day(d):
     return (date(y, m, dd) + timedelta(days=1)).isoformat()
 
 
-def run(root, tz_name, ledger_path, prices, today, refinalize=False, since=None):
+def run(root, tz_name, ledger_path, prices, today, refinalize=False, since=None,
+        records=day_records):
     existing = read_ledger(ledger_path)
-    days, meta = day_records(root, tz_name, since=since, until=_prev_day(today), prices=prices)
+    days, meta = records(root, tz_name, since=since, until=_prev_day(today), prices=prices)
     added = 0
     for rec in days:
         d = rec["date"]
@@ -52,7 +54,8 @@ def run(root, tz_name, ledger_path, prices, today, refinalize=False, since=None)
 
 def main():
     ap = argparse.ArgumentParser(description="Freeze completed days into snapshots.jsonl.")
-    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+    ap.add_argument("--root", action="append", default=None,
+                    help="transcript root (repeatable); default: every Claude store")
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--ledger", default=str(Path(__file__).parent / "snapshots.jsonl"))
     ap.add_argument("--refinalize", action="store_true",
@@ -64,12 +67,19 @@ def main():
     )
     ap.add_argument("--cursor-token-file", default=str(DEFAULT_TOKEN_FILE))
     ap.add_argument("--skip-cursor", action="store_true")
+    ap.add_argument("--factory-root", default=str(DEFAULT_FACTORY_ROOT),
+                    help="local mirror of the factory runners' transcript bucket (sync-factory.sh)")
+    ap.add_argument("--factory-ledger",
+                    default=str(Path(__file__).parent / "factory-snapshots.jsonl"))
+    ap.add_argument("--skip-factory", action="store_true")
     args = ap.parse_args()
 
     prices = load_prices()
     today = today_str(args.tz)
     since = args.since  # None => full span (the default catch-up behavior)
-    added, days, meta, existing = run(args.root, args.tz, args.ledger, prices, today,
+    roots = args.root or default_roots()
+    print(f"roots: {', '.join(str(r) for r in roots)}")
+    added, days, meta, existing = run(roots, args.tz, args.ledger, prices, today,
                                       refinalize=args.refinalize, since=since)
     led = read_ledger(args.ledger)
     print(f"snapshot: +{added} day(s); ledger now {len(led)} day(s); tz={args.tz}; "
@@ -83,6 +93,14 @@ def main():
         if oldest_log > _next_day(newest_led):
             print(f"  WARNING: gap — oldest log {oldest_log} is past ledger max {newest_led}; "
                   f"days between may have rolled off uncaptured.")
+    if not args.skip_factory and os.path.isdir(args.factory_root):
+        f_added, _, f_meta, _ = run(args.factory_root, args.tz, args.factory_ledger, prices, today,
+                                    refinalize=args.refinalize, since=since,
+                                    records=factory_day_records)
+        print(f"factory: +{f_added} day(s) from {args.factory_root}; "
+              f"ledger now {len(read_ledger(args.factory_ledger))} day(s)")
+        if f_meta.get("unpriced_models"):
+            print(f"  factory unpriced models (cost=0): {f_meta['unpriced_models']}")
     if not args.skip_cursor:
         token = token_from_env_or_file(path=args.cursor_token_file)
         if token:

@@ -4,7 +4,11 @@ Claude Code writes one JSONL line per content block of an assistant turn, each
 stamped with the SAME message-level usage, so raw line-summing inflates tokens
 ~2x. We dedupe by assistant message.id (keep the max-output occurrence).
 
-Stdlib only. Run `python3 parse.py` to write data.json from ~/.claude/projects.
+Claude Code may run with several config stores (CLAUDE_CONFIG_DIR per workspace:
+~/.claude, ~/.claude-fe, ~/.claude-10fed, ...), each with its own projects/ dir.
+default_roots() finds them all; every entry point reads the union.
+
+Stdlib only. Run `python3 parse.py` to write data.json from every store's projects/.
 """
 import argparse
 import collections
@@ -156,6 +160,7 @@ def parse_session(raw_text, file_path, tz, prices):
     for r in recs:
         day = local_day(r["timestamp"], tz)
         messages.append({
+            "id": r["id"],
             "day": day,
             "model": r["model"],
             "mclass": model_class(r["model"]),
@@ -167,6 +172,7 @@ def parse_session(raw_text, file_path, tz, prices):
         "label": session_label(raw_text),
         "project": project_of(cwd),
         "is_subagent": is_subagent(file_path, any_side),
+        "source": "local",
         "messages": messages,
     }
 
@@ -187,6 +193,7 @@ def build_days(sessions, since=None, until=None):
         "events": 0, "msgs": 0,
         "byModel": collections.defaultdict(_zero),
         "mainVsSub": {"main": _zero(), "sub": _zero()},
+        "bySource": collections.defaultdict(_zero),
         "projects": collections.Counter(),
         "sessions": [],
     })
@@ -200,6 +207,7 @@ def build_days(sessions, since=None, until=None):
             bucket["msgs"] += 1
             _add(bucket["byModel"][m["mclass"]], m)
             _add(bucket["mainVsSub"]["sub" if s["is_subagent"] else "main"], m)
+            _add(bucket["bySource"][s.get("source", "local")], m)
             tok = m["in"] + m["out"] + m["cc"] + m["cr"]
             bucket["projects"][s["project"]] += tok
             bucket["sessions"].append((s["label"], s["project"], tok))
@@ -214,6 +222,7 @@ def build_days(sessions, since=None, until=None):
             "msgs": b["msgs"],
             "byModel": {k: dict(v) for k, v in b["byModel"].items()},
             "mainVsSub": b["mainVsSub"],
+            "bySource": {k: dict(v) for k, v in b["bySource"].items()},
             "topProjects": [{"project": p, "total": t} for p, t in b["projects"].most_common(5)],
             "sampleSessions": [{"label": l, "project": p, "total": t} for l, p, t in sample],
         })
@@ -230,20 +239,61 @@ def _totals(days):
     return t
 
 
-def day_records(root, tz_name, since=None, until=None, prices=None):
-    """Glob logs, parse, and return (per-day records in [since,until], meta)."""
-    if prices is None:
-        prices = load_prices()
-    tz = ZoneInfo(tz_name)
+def default_roots(home=None, env=None):
+    """Every Claude Code transcript root: ~/.claude/projects, each ~/.claude-*/projects,
+    and $CLAUDE_CONFIG_DIR/projects. Stores without projects/ are skipped; roots that
+    resolve to the same directory (symlinked overlay) are kept once."""
+    home = Path(home) if home is not None else Path.home()
+    env = os.environ if env is None else env
+    candidates = [home / ".claude" / "projects"]
+    candidates += sorted(home.glob(".claude-*/projects"))
+    if env.get("CLAUDE_CONFIG_DIR"):
+        candidates.append(Path(env["CLAUDE_CONFIG_DIR"]).expanduser() / "projects")
+    roots, seen = [], set()
+    for c in candidates:
+        if not c.is_dir():
+            continue
+        real = os.path.realpath(c)
+        if real in seen:
+            continue
+        seen.add(real)
+        roots.append(c)
+    return roots
+
+
+def _as_roots(root):
+    return [root] if isinstance(root, (str, os.PathLike)) else list(root)
+
+
+def _mtime_floor(since, tz):
+    """Epoch seconds of local midnight starting `since` (None => no floor). A file
+    last written before then cannot hold a message dated on/after `since`."""
+    if not since:
+        return None
+    y, m, d = map(int, since.split("-"))
+    return datetime(y, m, d, tzinfo=tz).timestamp()
+
+
+def _jsonl_files(roots, modified_since=None):
+    seen = set()
+    for r in _as_roots(roots):
+        for f in glob.glob(os.path.join(str(r), "**", "*.jsonl"), recursive=True):
+            if modified_since is not None:
+                try:
+                    if os.path.getmtime(f) < modified_since:
+                        continue
+                except OSError:
+                    continue
+            real = os.path.realpath(f)
+            if real not in seen:
+                seen.add(real)
+                yield f
+
+
+def _records(sessions_iter, tz_name, since, until, prices):
     sessions = []
     unpriced = set()
-    for f in glob.glob(os.path.join(str(root), "**", "*.jsonl"), recursive=True):
-        try:
-            with open(f, "r", errors="ignore") as fh:
-                raw = fh.read()
-        except Exception:
-            continue
-        s = parse_session(raw, f, tz, prices)
+    for s in sessions_iter:
         for m in s["messages"]:
             d = m["day"]
             if not (m["model"] and d):
@@ -264,6 +314,68 @@ def day_records(root, tz_name, since=None, until=None, prices=None):
     return days, meta
 
 
+def _read(f):
+    try:
+        with open(f, "r", errors="ignore") as fh:
+            return fh.read()
+    except Exception:
+        return None
+
+
+def day_records(root, tz_name, since=None, until=None, prices=None):
+    """Glob logs under one root or a list of roots, parse, and return
+    (per-day records in [since,until], meta)."""
+    if prices is None:
+        prices = load_prices()
+    tz = ZoneInfo(tz_name)
+
+    def sessions():
+        for f in _jsonl_files(root, _mtime_floor(since, tz)):
+            raw = _read(f)
+            if raw is not None:
+                yield parse_session(raw, f, tz, prices)
+    return _records(sessions(), tz_name, since, until, prices)
+
+
+DEFAULT_FACTORY_ROOT = Path("~/.token-burn/factory-transcripts").expanduser()
+
+
+def factory_day_records(root, tz_name, since=None, until=None, prices=None):
+    """Remote factory runner transcripts, mirrored from the bucket laid out as
+    {runner}/{issue}/{execution}/{session}.jsonl. Attribution comes from the path
+    (every runner's cwd is the same /tmp/wt-N), and a message.id counts once across
+    files because a re-run turn re-uploads the session under a new execution."""
+    if prices is None:
+        prices = load_prices()
+    tz = ZoneInfo(tz_name)
+    root = Path(root)
+
+    def sessions():
+        seen = set()
+        for f in sorted(_jsonl_files(root, _mtime_floor(since, tz))):
+            parts = Path(f).relative_to(root).parts
+            if len(parts) < 2:
+                continue
+            raw = _read(f)
+            if raw is None:
+                continue
+            s = parse_session(raw, f, tz, prices)
+            fresh = []
+            for m in s["messages"]:
+                if m["id"] and m["id"] in seen:
+                    continue
+                seen.add(m["id"])
+                fresh.append(m)
+            runner, issue = parts[0], parts[1]
+            s["messages"] = fresh
+            s["project"] = s["source"] = f"factory:{runner}"
+            s["label"] = f"#{issue} {s['label']}"
+            yield s
+    if not root.is_dir():
+        return _records(iter(()), tz_name, since, until, prices)
+    return _records(sessions(), tz_name, since, until, prices)
+
+
 def scan(root, tz_name):
     days, meta = day_records(root, tz_name)
     return {"meta": meta, "days": days}
@@ -282,11 +394,12 @@ def _default_tz_name():
 
 def main():
     ap = argparse.ArgumentParser(description="Whole-corpus token-burn dump (ad-hoc).")
-    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+    ap.add_argument("--root", action="append", default=None,
+                    help="transcript root (repeatable); default: every Claude store")
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--out", default=str(Path(__file__).parent / "data.json"))
     args = ap.parse_args()
-    roll = scan(args.root, args.tz)
+    roll = scan(args.root or default_roots(), args.tz)
     with open(args.out, "w") as fh:
         json.dump(roll, fh)
     m = roll["meta"]

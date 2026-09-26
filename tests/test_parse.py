@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 from prices import load_prices
 from parse import (
+    default_roots,
     dedupe_messages, model_class, cost_usd, session_label,
     project_of, is_subagent, local_day, parse_session, build_days, day_records, scan,
 )
@@ -243,3 +244,57 @@ def test_day_records_reports_unpriced_models(tmp_path):
     assert "<synthetic>" in meta["unpriced_models"]
     # synthetic priced at $0
     assert meta["totals"]["cost_usd"] == 0.0
+
+
+# --- multi-store roots (per-workspace CLAUDE_CONFIG_DIR stores) ---
+
+def _write_session(dirpath, msg_id, out, day="2026-05-21"):
+    dirpath.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"type": "assistant", "timestamp": f"{day}T12:00:00Z", "cwd": "/x/proj",
+                       "message": {"id": msg_id, "model": "claude-opus-4-8",
+                                   "usage": {"input_tokens": 0, "output_tokens": out}}})
+    (dirpath / f"{msg_id}.jsonl").write_text(line + "\n")
+
+
+def test_default_roots_finds_default_and_workspace_stores(tmp_path):
+    for name in (".claude", ".claude-fe", ".claude-10fed"):
+        (tmp_path / name / "projects").mkdir(parents=True)
+    (tmp_path / ".claude-noprojects").mkdir()           # store without transcripts: skipped
+    roots = default_roots(home=tmp_path, env={})
+    assert [Path(r).parent.name for r in roots] == [".claude", ".claude-10fed", ".claude-fe"]
+
+
+def test_default_roots_dedupes_symlinked_store_and_includes_config_dir(tmp_path):
+    (tmp_path / ".claude" / "projects").mkdir(parents=True)
+    (tmp_path / ".claude-alias").mkdir()
+    (tmp_path / ".claude-alias" / "projects").symlink_to(tmp_path / ".claude" / "projects")
+    other = tmp_path / "elsewhere"
+    (other / "projects").mkdir(parents=True)
+    roots = default_roots(home=tmp_path, env={"CLAUDE_CONFIG_DIR": str(other)})
+    assert len(roots) == 2                               # alias collapsed onto .claude
+    assert str(other / "projects") in [str(r) for r in roots]
+
+
+def test_day_records_sums_across_multiple_roots(tmp_path):
+    _write_session(tmp_path / "a" / "p", "msg_1", out=10)
+    _write_session(tmp_path / "b" / "p", "msg_2", out=32)
+    days, meta = day_records([tmp_path / "a", tmp_path / "b"], "UTC", prices=PRICES)
+    assert meta["unique_messages"] == 2
+    assert days[0]["byModel"]["opus"]["out"] == 42
+
+
+def test_day_records_single_root_still_accepted(tmp_path):
+    _write_session(tmp_path / "a" / "p", "msg_1", out=10)
+    days, _ = day_records(str(tmp_path / "a"), "UTC", prices=PRICES)
+    assert days[0]["byModel"]["opus"]["out"] == 10
+
+
+def test_day_records_since_skips_files_not_modified_since(tmp_path):
+    import os
+    _write_session(tmp_path / "p", "msg_old", out=10, day="2026-05-21")
+    old = tmp_path / "p" / "msg_old.jsonl"
+    os.utime(old, (0, 0))                                   # last written 1970
+    days, _ = day_records(tmp_path, "UTC", since="2026-05-21", prices=PRICES)
+    assert days == []                                       # skipped by mtime
+    days, _ = day_records(tmp_path, "UTC", prices=PRICES)   # no since => full scan
+    assert days[0]["byModel"]["opus"]["out"] == 10

@@ -15,7 +15,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from parse import _default_tz_name
+from parse import DEFAULT_FACTORY_ROOT, _default_tz_name, default_roots
 from prices import load_prices
 from ledger import assemble_rollup, today_str
 from cursor_local import read_cursor_activity
@@ -30,7 +30,10 @@ DEFAULT_CURSOR_DB = Path(
 def build_payload(cfg):
     today = cfg.get("today") or today_str(cfg["tz"])
     payload = assemble_rollup(
-        cfg["ledger"], cfg["root"], cfg["tz"], today, prices=load_prices()
+        cfg["ledger"], cfg.get("root") or default_roots(), cfg["tz"], today,
+        prices=load_prices(),
+        factory_ledger_path=cfg.get("factory_ledger"),
+        factory_root=cfg.get("factory_root"),
     )
     payload["cursor"] = {
         "local": read_cursor_activity(cfg["cursor_db"], cfg["tz"]),
@@ -86,11 +89,15 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="Serve the token-burn dashboard locally.")
-    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+    ap.add_argument("--root", action="append", default=None,
+                    help="transcript root (repeatable); default: every Claude store, "
+                         "re-discovered per request")
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--ledger", default=str(HERE / "snapshots.jsonl"))
     ap.add_argument("--cursor-db", default=str(DEFAULT_CURSOR_DB))
     ap.add_argument("--cursor-ledger", default=str(HERE / "cursor-snapshots.jsonl"))
+    ap.add_argument("--factory-ledger", default=str(HERE / "factory-snapshots.jsonl"))
+    ap.add_argument("--factory-root", default=str(DEFAULT_FACTORY_ROOT))
     ap.add_argument("--port", type=int, default=8799)
     args = ap.parse_args()
 
@@ -100,6 +107,8 @@ def main():
         "ledger": args.ledger,
         "cursor_db": args.cursor_db,
         "cursor_ledger": args.cursor_ledger,
+        "factory_ledger": args.factory_ledger,
+        "factory_root": args.factory_root,
         "today": None,
     }
     port = choose_port(args.port, 20, _port_free)

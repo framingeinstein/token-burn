@@ -227,6 +227,15 @@ function drawModels(){
   let html='<div style="margin-bottom:14px"><div style="color:var(--muted);font-size:12px;margin-bottom:4px">by model</div>';
   for(const m of order) html+=barRow(m, models[m], mTot, W, palette[m]||palette.other);
   html+='</div>';
+  const src=aggBy(d=>d.bySource||{local:dayComponents(d)});
+  const srcKeys=Object.keys(src).filter(k=>k!=='local').sort((a,b)=>src[b]-src[a]);
+  if(srcKeys.length){
+    const sTot=Object.values(src).reduce((a,b)=>a+b,0);
+    html+='<div style="margin-bottom:14px"><div style="color:var(--muted);font-size:12px;margin-bottom:4px">by source — this machine vs remote factory runners</div>';
+    html+=barRow('this machine', src.local||0, sTot, W, '#1B2A4A');
+    for(const k of srcKeys) html+=barRow(k, src[k], sTot, W, '#3a6ea5');
+    html+='</div>';
+  }
   const av=aggBy(d=>d.mainVsSub); const aTot=(av.main||0)+(av.sub||0);
   if(aTot){
     html+='<div><div style="color:var(--muted);font-size:12px;margin-bottom:4px">main thread vs sub-agents</div>';
