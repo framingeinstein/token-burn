@@ -15,7 +15,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from parse import _default_tz_name
+from parse import _default_tz_name, default_roots
 from prices import load_prices
 from ledger import assemble_rollup, today_str
 from cursor_local import read_cursor_activity
@@ -30,7 +30,8 @@ DEFAULT_CURSOR_DB = Path(
 def build_payload(cfg):
     today = cfg.get("today") or today_str(cfg["tz"])
     payload = assemble_rollup(
-        cfg["ledger"], cfg["root"], cfg["tz"], today, prices=load_prices()
+        cfg["ledger"], cfg.get("root") or default_roots(), cfg["tz"], today,
+        prices=load_prices()
     )
     payload["cursor"] = {
         "local": read_cursor_activity(cfg["cursor_db"], cfg["tz"]),
@@ -86,7 +87,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="Serve the token-burn dashboard locally.")
-    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+    ap.add_argument("--root", action="append", default=None,
+                    help="transcript root (repeatable); default: every Claude store, "
+                         "re-discovered per request")
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--ledger", default=str(HERE / "snapshots.jsonl"))
     ap.add_argument("--cursor-db", default=str(DEFAULT_CURSOR_DB))

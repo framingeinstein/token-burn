@@ -4,7 +4,11 @@ Claude Code writes one JSONL line per content block of an assistant turn, each
 stamped with the SAME message-level usage, so raw line-summing inflates tokens
 ~2x. We dedupe by assistant message.id (keep the max-output occurrence).
 
-Stdlib only. Run `python3 parse.py` to write data.json from ~/.claude/projects.
+Claude Code may run with several config stores (CLAUDE_CONFIG_DIR per workspace:
+~/.claude, ~/.claude-fe, ~/.claude-10fed, ...), each with its own projects/ dir.
+default_roots() finds them all; every entry point reads the union.
+
+Stdlib only. Run `python3 parse.py` to write data.json from every store's projects/.
 """
 import argparse
 import collections
@@ -230,14 +234,51 @@ def _totals(days):
     return t
 
 
+def default_roots(home=None, env=None):
+    """Every Claude Code transcript root: ~/.claude/projects, each ~/.claude-*/projects,
+    and $CLAUDE_CONFIG_DIR/projects. Stores without projects/ are skipped; roots that
+    resolve to the same directory (symlinked overlay) are kept once."""
+    home = Path(home) if home is not None else Path.home()
+    env = os.environ if env is None else env
+    candidates = [home / ".claude" / "projects"]
+    candidates += sorted(home.glob(".claude-*/projects"))
+    if env.get("CLAUDE_CONFIG_DIR"):
+        candidates.append(Path(env["CLAUDE_CONFIG_DIR"]).expanduser() / "projects")
+    roots, seen = [], set()
+    for c in candidates:
+        if not c.is_dir():
+            continue
+        real = os.path.realpath(c)
+        if real in seen:
+            continue
+        seen.add(real)
+        roots.append(c)
+    return roots
+
+
+def _as_roots(root):
+    return [root] if isinstance(root, (str, os.PathLike)) else list(root)
+
+
+def _jsonl_files(roots):
+    seen = set()
+    for r in _as_roots(roots):
+        for f in glob.glob(os.path.join(str(r), "**", "*.jsonl"), recursive=True):
+            real = os.path.realpath(f)
+            if real not in seen:
+                seen.add(real)
+                yield f
+
+
 def day_records(root, tz_name, since=None, until=None, prices=None):
-    """Glob logs, parse, and return (per-day records in [since,until], meta)."""
+    """Glob logs under one root or a list of roots, parse, and return
+    (per-day records in [since,until], meta)."""
     if prices is None:
         prices = load_prices()
     tz = ZoneInfo(tz_name)
     sessions = []
     unpriced = set()
-    for f in glob.glob(os.path.join(str(root), "**", "*.jsonl"), recursive=True):
+    for f in _jsonl_files(root):
         try:
             with open(f, "r", errors="ignore") as fh:
                 raw = fh.read()
@@ -282,11 +323,12 @@ def _default_tz_name():
 
 def main():
     ap = argparse.ArgumentParser(description="Whole-corpus token-burn dump (ad-hoc).")
-    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+    ap.add_argument("--root", action="append", default=None,
+                    help="transcript root (repeatable); default: every Claude store")
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--out", default=str(Path(__file__).parent / "data.json"))
     args = ap.parse_args()
-    roll = scan(args.root, args.tz)
+    roll = scan(args.root or default_roots(), args.tz)
     with open(args.out, "w") as fh:
         json.dump(roll, fh)
     m = roll["meta"]

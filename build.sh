@@ -8,7 +8,7 @@ from serve import DEFAULT_CURSOR_DB, build_payload
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--tz", default=None)
-ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+ap.add_argument("--root", action="append", default=None)  # default: every Claude store
 ap.add_argument("--ledger", default="snapshots.jsonl")  # cwd is the script dir (cd above); __file__ is undefined in a stdin heredoc
 ap.add_argument("--cursor-db", default=str(DEFAULT_CURSOR_DB))
 ap.add_argument("--cursor-ledger", default="cursor-snapshots.jsonl")

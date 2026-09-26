@@ -21,7 +21,7 @@ python3 snapshot.py    # capture the history sitting in your logs right now
 ./build.sh             # build and open the dashboard
 ```
 
-`snapshot.py` reads `~/.claude/projects/**/*.jsonl` and freezes every completed day into a local
+`snapshot.py` reads `**/*.jsonl` under every Claude Code store — `~/.claude/projects`, each `~/.claude-*/projects` (per-workspace `CLAUDE_CONFIG_DIR` logins), and `$CLAUDE_CONFIG_DIR/projects` — and freezes every completed day into a local
 archive. `build.sh` turns that archive — plus today, parsed live — into a fully self-contained
 `out/dashboard.html`. Double-click that file any time; it works offline, forever.
 

@@ -11,7 +11,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from parse import day_records, _default_tz_name
+from parse import day_records, default_roots, _default_tz_name
 from prices import load_prices
 from ledger import read_ledger, append_day, today_str
 from cursor_usage import (
@@ -52,7 +52,8 @@ def run(root, tz_name, ledger_path, prices, today, refinalize=False, since=None)
 
 def main():
     ap = argparse.ArgumentParser(description="Freeze completed days into snapshots.jsonl.")
-    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+    ap.add_argument("--root", action="append", default=None,
+                    help="transcript root (repeatable); default: every Claude store")
     ap.add_argument("--tz", default=_default_tz_name())
     ap.add_argument("--ledger", default=str(Path(__file__).parent / "snapshots.jsonl"))
     ap.add_argument("--refinalize", action="store_true",
@@ -69,7 +70,9 @@ def main():
     prices = load_prices()
     today = today_str(args.tz)
     since = args.since  # None => full span (the default catch-up behavior)
-    added, days, meta, existing = run(args.root, args.tz, args.ledger, prices, today,
+    roots = args.root or default_roots()
+    print(f"roots: {', '.join(str(r) for r in roots)}")
+    added, days, meta, existing = run(roots, args.tz, args.ledger, prices, today,
                                       refinalize=args.refinalize, since=since)
     led = read_ledger(args.ledger)
     print(f"snapshot: +{added} day(s); ledger now {len(led)} day(s); tz={args.tz}; "
