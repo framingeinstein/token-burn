@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from github_client import (
+    GitHubError,
     GitHubUnreachable,
     Quota,
     QuotaFloorHit,
@@ -34,7 +35,6 @@ DEFAULT_CACHE_DIR = Path("~/.token-burn/outcomes").expanduser()
 DEFAULT_ORGS = ("synkhos", "FramingEinsteinInc", "framingeinstein")
 
 _PTS_LABEL_RE = re.compile(r"^pts:(unrated|\d+)$")
-_BOT_SUFFIX = "[bot]"
 _ISSUE_BRANCH_RE = re.compile(r"^feat/(\d+)-")
 _REQUESTED_BY_RE = re.compile(r"^\*\*Requested by:\*\*\s*([A-Za-z0-9-]{1,39})\s*$", re.MULTILINE)
 
@@ -107,12 +107,22 @@ def _label_names(labels):
 
 def pts_and_source(labels, events):
     """`(pts, pts_source)` from the `pts:N` / `pts:unrated` label (spec Sec4.2,
-    R-5). `pts_source` is a best-effort read of who most recently applied the
-    current label from the timeline: a bot actor (e.g. the rater) -> "rater",
-    a human actor -> "human". The rating comment (R-6) is the real source of
-    truth for this but reading it isn't in the Sec5.2 REST/GraphQL policy
-    table, so this fetcher never claims "backfill" -- only the rating/backfill
-    skill (built in synkhos/factory) can."""
+    R-5).
+
+    `pts_source` is `None` for now (fix round 1, controller ruling
+    2026-09-27): the rating skill runs from sessions using the SAME user's
+    GitHub token as a manual label change, so a timeline-actor heuristic
+    (e.g. a `[bot]`-suffixed login) can't actually tell "rater" apart from
+    "human" -- it mislabels rater-applied labels as human. `pts` is still
+    read from the label as-is.
+
+    SEAM for synkhos/factory#166: once that issue defines the R-6
+    rating-comment markers, derive `pts_source` from them instead --
+    "rater" or "backfill" read from the marker itself, "human" when a
+    `labeled` timeline event for this label postdates the marker's comment
+    (i.e. the label was changed after the rating). `events` is kept as a
+    parameter for that future seam; it is unused today.
+    """
     label_name = next((l for l in labels if l.startswith("pts:")), None)
     if not label_name:
         return None, None
@@ -120,20 +130,9 @@ def pts_and_source(labels, events):
     if not m:
         return None, None
     val = m.group(1)
-    pts = None if val == "unrated" else int(val)
-    if pts is None:
+    if val == "unrated":
         return None, None
-    actor = None
-    for ev in events:
-        if ev.get("event") == "labeled" and (ev.get("label") or {}).get("name") == label_name:
-            actor = (ev.get("actor") or {}).get("login") or actor
-    if actor and actor.endswith(_BOT_SUFFIX):
-        source = "rater"
-    elif actor:
-        source = "human"
-    else:
-        source = "rater"  # no timeline evidence of a human override
-    return pts, source
+    return int(val), None
 
 
 def requested_by_and_source(body, author):
@@ -299,15 +298,18 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, orgs=DEFAULT_ORGS, token=None,
                     get_token=github_token, transport=default_transport, quota=None):
     """Fetch the outcome cache for `orgs` (REST-first, spec Sec5.2).
 
-    Stops cleanly at the quota floor, or when GitHub is unreachable, keeping
-    whatever cache and watermarks already exist; the next run resumes from
-    there. `outcomes_as_of` only advances on a run that finishes every repo
-    without being cut short (spec Sec8: both failure rows keep "outcomes as
-    of" as it was).
+    Stops cleanly at the quota floor, when GitHub is unreachable, or on a
+    surfaced non-2xx REST error (401/403/404/5xx/... -- fix round 1: these
+    used to fall through as "no items" and could report a clean run with
+    nothing actually verified), keeping whatever cache and watermarks already
+    exist; the next run resumes from there. `outcomes_as_of` only advances on
+    a run that finishes every repo without being cut short (spec Sec8: every
+    failure row keeps "outcomes as of" as it was).
 
     Returns a report: {"issues": n, "prs": n, "calls": {"core": x, "graphql": y},
-    "stopped": None | "quota_floor" | "unreachable", "repos_seen": [...],
-    "outcomes_as_of": iso-or-None}.
+    "stopped": None | "quota_floor" | "unreachable" | "github_error",
+    "repos_seen": [...], "outcomes_as_of": iso-or-None,
+    "error": {"status": int, "endpoint": str} (only when stopped == "github_error")}.
     """
     paths = cache_paths(cache_dir)
     state = read_state(paths["state"])
@@ -331,6 +333,11 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, orgs=DEFAULT_ORGS, token=None,
         report["stopped"] = "unreachable"
         report["calls"] = dict(quota.calls)
         return report
+    except GitHubError as e:
+        report["stopped"] = "github_error"
+        report["error"] = {"status": e.status, "endpoint": e.url}
+        report["calls"] = dict(quota.calls)
+        return report
 
     for repo in repos:
         report["repos_seen"].append(repo)
@@ -346,6 +353,12 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, orgs=DEFAULT_ORGS, token=None,
         except GitHubUnreachable:
             write_state(paths["state"], state)
             report["stopped"] = "unreachable"
+            report["calls"] = dict(quota.calls)
+            return report
+        except GitHubError as e:
+            write_state(paths["state"], state)
+            report["stopped"] = "github_error"
+            report["error"] = {"status": e.status, "endpoint": e.url}
             report["calls"] = dict(quota.calls)
             return report
         write_state(paths["state"], state)
@@ -378,7 +391,7 @@ def main():
     report = fetch_outcomes(cache_dir=args.cache_dir, orgs=args.orgs or DEFAULT_ORGS, quota=quota)
     print(json.dumps(report, indent=2))
     if report["stopped"]:
-        raise SystemExit(1 if report["stopped"] == "unreachable" else 0)
+        raise SystemExit(1 if report["stopped"] in ("unreachable", "github_error") else 0)
 
 
 if __name__ == "__main__":

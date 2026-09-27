@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from github_client import GitHubUnreachable, Quota, QuotaFloorHit
+from github_client import GitHubError, GitHubUnreachable, Quota, QuotaFloorHit
 from outcomes import (
     approved_by_from_timeline,
     build_issue_record,
@@ -52,9 +52,12 @@ class ScriptedTransport:
 # --- record field extraction (pure) -----------------------------------------
 
 def test_pts_and_source_parses_numeric_label():
+    # fix round 1 (controller ruling): pts_source is null for now -- the
+    # rater runs from the SAME user's GitHub token as a manual label change,
+    # so an actor-login heuristic can't tell "rater" from "human" apart.
     labels = ["pts:5", "route:foo"]
     events = [{"event": "labeled", "label": {"name": "pts:5"}, "actor": {"login": "github-actions[bot]"}}]
-    assert pts_and_source(labels, events) == (5, "rater")
+    assert pts_and_source(labels, events) == (5, None)
 
 
 def test_pts_and_source_unrated_label():
@@ -65,10 +68,13 @@ def test_pts_and_source_no_label():
     assert pts_and_source(["route:foo"], []) == (None, None)
 
 
-def test_pts_and_source_human_actor_marks_human():
+def test_pts_and_source_source_is_null_regardless_of_timeline_actor():
+    # No actor-based heuristic: a "human"-looking actor doesn't produce
+    # pts_source: "human" either -- it's always null until synkhos/factory#166
+    # defines the R-6 rating-comment markers this should be read from.
     labels = ["pts:8"]
     events = [{"event": "labeled", "label": {"name": "pts:8"}, "actor": {"login": "jason"}}]
-    assert pts_and_source(labels, events) == (8, "human")
+    assert pts_and_source(labels, events) == (8, None)
 
 
 def test_requested_by_from_header_line():
@@ -162,7 +168,7 @@ def test_build_issue_record_shape():
         "repo": "o/r", "number": 10, "author": "jason", "requested_by": "ricky",
         "requester_source": "requested_by", "state": "closed", "state_reason": "completed",
         "closed_at": "2026-09-01T00:00:00Z", "reopened_at": ["t1"], "pts": 3,
-        "pts_source": "rater", "labels": ["pts:3"], "approved_by": "jason",
+        "pts_source": None, "labels": ["pts:3"], "approved_by": "jason",
     }
     assert "body" not in rec and "title" not in rec
 
@@ -343,3 +349,39 @@ def test_fetch_outcomes_never_calls_graphql_in_the_default_path(tmp_path):
     # so REST resolves nothing -> GraphQL IS the right call here (one of the
     # two named cases), and it should be exactly one call.
     assert report["calls"]["graphql"] == 1
+
+
+# --- fix round 1: non-2xx REST responses must surface, never look like "no data" --
+
+def test_fetch_outcomes_401_on_org_listing_stops_run_keeps_cache_unchanged(tmp_path):
+    paths = cache_paths(tmp_path)
+    write_state(paths["state"], {"repos": {}, "outcomes_as_of": "2026-09-01T00:00:00Z"})
+    append_jsonl(paths["issues"], {"repo": "synkhos/a", "number": 1, "state": "open"})
+    before = paths["issues"].read_text()
+
+    script = {("GET", "/orgs/synkhos/repos"): [(401, rl(4999), {"message": "Bad credentials"})]}
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+
+    assert report["stopped"] == "github_error"
+    assert report["error"]["status"] == 401
+    assert "/orgs/synkhos/repos" in report["error"]["endpoint"]
+    state = read_state(paths["state"])
+    assert state["outcomes_as_of"] == "2026-09-01T00:00:00Z"  # unchanged
+    assert paths["issues"].read_text() == before  # cache untouched
+
+
+def test_fetch_outcomes_500_on_a_repo_listing_call_stops_run_keeps_watermark(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(500, rl(5000), {"message": "Internal error"})],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+
+    assert report["stopped"] == "github_error"
+    assert report["error"]["status"] == 500
+    assert "/repos/synkhos/a/issues" in report["error"]["endpoint"]
+    assert report["outcomes_as_of"] is None  # never advanced
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["outcomes_as_of"] is None

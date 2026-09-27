@@ -31,6 +31,21 @@ class GitHubUnreachable(Exception):
     response. The caller keeps its cache and watermarks unchanged (spec Sec8)."""
 
 
+class GitHubError(Exception):
+    """A REST response outside {200, 304} -- 401/403 (incl. secondary rate
+    limit)/404/5xx/etc. Carries only `status` and the request `url` (never
+    headers or the token), so it's always safe to log or report. Fix round 1:
+    previously a non-2xx whose body wasn't a JSON list fell through as "no
+    items", so a bad token or a typo'd org/repo looked like a clean, empty
+    run. Now it's surfaced so the caller can tell "nothing changed" apart
+    from "the call failed"."""
+
+    def __init__(self, status, url):
+        self.status = status
+        self.url = url
+        super().__init__(f"GitHub REST {status} from {url}")
+
+
 class QuotaFloorHit(Exception):
     """Raised by Quota.check() before a call would draw a pool below its floor."""
 
@@ -148,6 +163,9 @@ def rest_pages(url, token, quota, transport, etag=None, stop=None):
     - `stop(item)`: when it's true for an item, that item and the rest of the
       page are dropped, the truncated page is yielded, and no further page is
       requested (the watermark boundary, spec Sec5.2 row 2).
+    - Any other status (401/403/404/5xx/...) raises `GitHubError` -- it is
+      never treated as "no items" (fix round 1: that used to hide a bad token
+      or a bad org/repo behind an apparently clean, empty run).
     """
     page_url = url
     first = True
@@ -158,10 +176,9 @@ def rest_pages(url, token, quota, transport, etag=None, stop=None):
         if status == 304:
             yield status, None, resp_headers
             return
-        items = parsed if isinstance(parsed, list) else None
-        if items is None:
-            yield status, items, resp_headers
-            return
+        if status != 200:
+            raise GitHubError(status, page_url)
+        items = parsed if isinstance(parsed, list) else []
         if stop is not None:
             kept = []
             hit = False

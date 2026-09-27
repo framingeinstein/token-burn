@@ -3,6 +3,7 @@
 import pytest
 
 from github_client import (
+    GitHubError,
     GitHubUnreachable,
     Quota,
     QuotaFloorHit,
@@ -255,3 +256,38 @@ def test_default_transport_wraps_connection_errors():
 
     with pytest.raises(GitHubUnreachable):
         gc.default_transport("GET", "https://api.github.com/x", {}, urlopen=boom)
+
+
+# --- fix round 1: non-2xx surfaces as GitHubError, never as "no items" ------
+
+def test_rest_pages_raises_github_error_on_401():
+    q = Quota()
+    transport = FakeTransport([(401, rl(4999), {"message": "Bad credentials"})])
+    with pytest.raises(GitHubError) as exc:
+        list(rest_pages("https://api.github.com/orgs/x/repos", "sekret-tok", q, transport))
+    assert exc.value.status == 401
+    assert "orgs/x/repos" in exc.value.url
+    assert "sekret-tok" not in str(exc.value)  # no token in the surfaced error
+
+
+def test_rest_pages_raises_github_error_on_500():
+    q = Quota()
+    transport = FakeTransport([(500, rl(4999), {"message": "Internal error"})])
+    with pytest.raises(GitHubError) as exc:
+        list(rest_pages("https://api.github.com/repos/o/r/issues", "tok", q, transport))
+    assert exc.value.status == 500
+
+
+def test_rest_pages_raises_github_error_on_404():
+    q = Quota()
+    transport = FakeTransport([(404, rl(4999), {"message": "Not Found"})])
+    with pytest.raises(GitHubError) as exc:
+        list(rest_pages("https://api.github.com/orgs/nope/repos", "tok", q, transport))
+    assert exc.value.status == 404
+
+
+def test_list_org_repos_propagates_github_error():
+    q = Quota()
+    transport = FakeTransport([(403, rl(4999), {"message": "secondary rate limit"})])
+    with pytest.raises(GitHubError):
+        list_org_repos("synkhos", "tok", q, transport)
