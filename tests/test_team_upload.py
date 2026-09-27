@@ -228,3 +228,104 @@ def test_missing_credential_is_recorded_as_unreachable_not_a_crash(tmp_path):
                                      transport=transport, credential_provider=lambda: None)
     assert transport.calls == []
     assert "2026-09-25" in result["unreachable"]
+
+
+# --- fix round 1 (review): an unexpected per-day failure never loses -------
+# --- another day's already-persisted progress, and never propagates -------
+
+def test_raising_credential_provider_is_recorded_not_propagated(tmp_path):
+    usage_dir = tmp_path / "usage"
+    append_usage_records(usage_dir, "2026-09-25", [_valid_record()])
+    state_path = tmp_path / "state.json"
+    transport = ScriptedTransport()  # must never be called
+
+    def bad_credential():
+        raise RuntimeError("no keychain access")
+
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+                                     transport=transport, credential_provider=bad_credential)
+    assert transport.calls == []
+    assert "no keychain access" in result["unreachable"]["2026-09-25"]
+    # never propagated -- reaching this line at all proves it
+
+
+def test_unexpected_error_for_one_day_does_not_lose_another_days_progress(tmp_path):
+    usage_dir = tmp_path / "usage"
+    append_usage_records(usage_dir, "2026-09-25", [_valid_record(day="2026-09-25")])
+    append_usage_records(usage_dir, "2026-09-26",
+                         [_valid_record(day="2026-09-26", session="sess-2")])
+    state_path = tmp_path / "state.json"
+
+    def flaky_transport(method, url, headers, body=None):
+        if body["day"] == "2026-09-25":
+            return 202, {}, None
+        raise RuntimeError("boom")  # not DoorUnreachable -- an unanticipated bug
+
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+                                     transport=flaky_transport, credential_provider=_cred)
+    assert result["sent"] == ["2026-09-25"]
+    assert "boom" in result["unreachable"]["2026-09-26"]
+
+    # day 1's acceptance was persisted (not discarded by day 2's exception)
+    status = tu.team_upload_status(CONFIG, state_path=state_path)
+    assert status["last_success_at"] is not None
+    assert "2026-09-26" in status["pending"]
+
+    # next run: day 1 is not resent (would raise via the assertion below);
+    # day 2 is retried
+    def transport_2nd_run(method, url, headers, body=None):
+        assert body["day"] == "2026-09-26", "day 1 must not be resent after success"
+        return 202, {}, None
+
+    result2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+                                     transport=transport_2nd_run, credential_provider=_cred)
+    assert result2["sent"] == ["2026-09-26"]
+
+
+# --- fix round 1 (review): a malformed 2xx body is accepted-but-unparsed ---
+
+class _FakeHTTPResponse:
+    def __init__(self, status, raw, headers=None):
+        self.status = status
+        self._raw = raw
+        self._headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def getheaders(self):
+        return list(self._headers.items())
+
+    def read(self):
+        return self._raw
+
+
+def test_default_transport_treats_a_malformed_2xx_body_as_accepted():
+    def fake_urlopen(req, timeout=30):
+        return _FakeHTTPResponse(202, b"not valid json {{{")
+
+    status, headers, parsed = tu.default_transport(
+        "POST", "https://door.example/upload",
+        {"Content-Type": "application/json"},
+        {"tenant": "framingeinstein", "day": "2026-09-25", "records": []},
+        urlopen=fake_urlopen)
+    assert status == 202
+    assert parsed is None  # never raises on an unparsable-but-accepted body
+
+
+def test_malformed_2xx_body_end_to_end_is_sent_not_unreachable(tmp_path):
+    usage_dir = tmp_path / "usage"
+    append_usage_records(usage_dir, "2026-09-25", [_valid_record()])
+    state_path = tmp_path / "state.json"
+
+    def malformed_body_transport(method, url, headers, body=None):
+        return 202, {}, None  # what default_transport itself now returns for this case
+
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+                                     transport=malformed_body_transport,
+                                     credential_provider=_cred)
+    assert result["sent"] == ["2026-09-25"]
+    assert result["unreachable"] == {}

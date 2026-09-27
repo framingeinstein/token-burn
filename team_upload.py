@@ -109,14 +109,25 @@ def default_transport(method, url, headers, body=None, urlopen=_urlopen):
     """Real HTTP transport (urllib, stdlib only). Returns `(status, headers,
     parsed_json)` for both success and HTTP-error (non-2xx) responses;
     raises `DoorUnreachable` for connection-level failures so callers can
-    tell "refused" apart from "the door is down"."""
+    tell "refused" apart from "the door is down".
+
+    Fix round 1 (review): a 2xx body that isn't valid JSON is treated as
+    accepted-but-unparsed (`parsed=None`) rather than raising -- the spec's
+    rule is "success = 2xx" (§ the brief), the status code is what the
+    caller acts on, and the door already accepted the batch by the time its
+    body is read. Only the non-2xx path's `{error,message,code}` body needs
+    to parse for the caller to show a reason; that path already degraded to
+    `parsed=None` on a bad body."""
     data = json.dumps(body).encode() if body is not None else None
     req = Request(url, data=data, headers=headers, method=method)
     try:
         with urlopen(req, timeout=30) as resp:
             raw = resp.read()
             hdrs = {k.lower(): v for k, v in resp.getheaders()}
-            parsed = json.loads(raw) if raw else None
+            try:
+                parsed = json.loads(raw) if raw else None
+            except Exception:
+                parsed = None
             return resp.status, hdrs, parsed
     except HTTPError as e:
         hdrs = {k.lower(): v for k, v in (e.headers.items() if e.headers else [])}
@@ -201,11 +212,17 @@ def upload_pending_days(usage_dir, config, *, state_path=DEFAULT_STATE_PATH,
 
     Otherwise returns `{"sent": [...days], "refused": {day: reason},
     "invalid": {day: reason}, "unreachable": {day: reason}}` -- a day
-    appears in at most one bucket. Never raises: a failure for one day is
-    recorded and the run moves on to the next day. `usage_dir`'s finalized
-    archives are only ever read here, never written -- local finalization
-    (T1/snapshot.py) is completely unaffected by anything that happens in
-    this function."""
+    appears in at most one bucket. Never raises: a failure for one day
+    (including one this function didn't anticipate -- a raising
+    `credential_provider`, a transport bug, ...) is recorded and the run
+    moves on to the next day. `usage_dir`'s finalized archives are only ever
+    read here, never written -- local finalization (T1/snapshot.py) is
+    completely unaffected by anything that happens in this function.
+
+    Fix round 1 (review): state is persisted after EVERY day, not once
+    after the whole loop -- so a day already accepted earlier in the same
+    run is never lost (and re-sent next run) just because a later day in
+    the same run hit an unexpected error."""
     if not config:
         return None
     now = now or _now_iso()
@@ -214,54 +231,71 @@ def upload_pending_days(usage_dir, config, *, state_path=DEFAULT_STATE_PATH,
     result = {"sent": [], "refused": {}, "invalid": {}, "unreachable": {}}
 
     for day in _usage_days(usage_dir):
-        records = read_usage_records(usage_dir, day)
-        if not records:
-            continue
-
-        invalid_reason = _validate_day(records)
-        if invalid_reason:
-            days_state[day] = {"status": "invalid", "reason": invalid_reason,
-                               "last_attempt_at": now}
-            result["invalid"][day] = invalid_reason
-            continue
-
-        content_hash = _content_hash(records)
-        entry = days_state.get(day)
-        if entry and entry.get("status") == "sent" and entry.get("content_hash") == content_hash:
-            continue  # already accepted, unchanged: sent once (R11)
-
-        credential = credential_provider()
-        if not credential:
-            reason = "no house credential available"
-            days_state[day] = {"status": "unreachable", "reason": reason,
-                               "content_hash": content_hash, "last_attempt_at": now}
-            result["unreachable"][day] = reason
-            continue
-
-        headers = {"Content-Type": "application/json",
-                  "Authorization": f"Bearer {credential}"}
-        payload = {"tenant": config["tenant"], "day": day, "records": records}
         try:
-            status, _hdrs, parsed = transport("POST", config["door_url"], headers, payload)
-        except DoorUnreachable as exc:
+            records = read_usage_records(usage_dir, day)
+            if not records:
+                continue
+
+            invalid_reason = _validate_day(records)
+            if invalid_reason:
+                days_state[day] = {"status": "invalid", "reason": invalid_reason,
+                                   "last_attempt_at": now}
+                result["invalid"][day] = invalid_reason
+                continue
+
+            content_hash = _content_hash(records)
+            entry = days_state.get(day)
+            if entry and entry.get("status") == "sent" and entry.get("content_hash") == content_hash:
+                continue  # already accepted, unchanged: sent once (R11)
+
+            credential = credential_provider()
+            if not credential:
+                reason = "no house credential available"
+                days_state[day] = {"status": "unreachable", "reason": reason,
+                                   "content_hash": content_hash, "last_attempt_at": now}
+                result["unreachable"][day] = reason
+                continue
+
+            headers = {"Content-Type": "application/json",
+                      "Authorization": f"Bearer {credential}"}
+            payload = {"tenant": config["tenant"], "day": day, "records": records}
+            try:
+                status, _hdrs, parsed = transport("POST", config["door_url"], headers, payload)
+            except DoorUnreachable as exc:
+                reason = str(exc)
+                days_state[day] = {"status": "unreachable", "reason": reason,
+                                   "content_hash": content_hash, "last_attempt_at": now}
+                result["unreachable"][day] = reason
+                continue
+
+            if 200 <= status < 300:
+                days_state[day] = {"status": "sent", "content_hash": content_hash,
+                                   "last_success_at": now}
+                result["sent"].append(day)
+            else:
+                reason = parsed if isinstance(parsed, dict) else {
+                    "error": "unknown", "message": f"HTTP {status}", "code": None}
+                days_state[day] = {"status": "refused", "reason": reason,
+                                   "content_hash": content_hash, "last_attempt_at": now}
+                result["refused"][day] = reason
+        except Exception as exc:
+            # Anything this function didn't anticipate (a raising
+            # credential_provider, a transport bug that isn't
+            # DoorUnreachable, ...): record it and move on to the next day
+            # rather than letting it propagate -- "unreachable" because the
+            # failure is this module's or the door's, not necessarily the
+            # record's, so it's retried next run rather than parked as
+            # unfixably "invalid".
             reason = str(exc)
             days_state[day] = {"status": "unreachable", "reason": reason,
-                               "content_hash": content_hash, "last_attempt_at": now}
+                               "last_attempt_at": now}
             result["unreachable"][day] = reason
-            continue
+        finally:
+            # Persisted after every day (not once after the whole loop) so
+            # a day already accepted earlier in this run is never lost --
+            # and never re-sent next run -- just because a later day raised.
+            write_upload_state(state_path, state)
 
-        if 200 <= status < 300:
-            days_state[day] = {"status": "sent", "content_hash": content_hash,
-                               "last_success_at": now}
-            result["sent"].append(day)
-        else:
-            reason = parsed if isinstance(parsed, dict) else {
-                "error": "unknown", "message": f"HTTP {status}", "code": None}
-            days_state[day] = {"status": "refused", "reason": reason,
-                               "content_hash": content_hash, "last_attempt_at": now}
-            result["refused"][day] = reason
-
-    write_upload_state(state_path, state)
     return result
 
 

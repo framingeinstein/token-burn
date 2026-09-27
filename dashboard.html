@@ -441,7 +441,7 @@ function drawTeamUpload(){
     let rows='';
     for(const day of refusedDays){
       const r=tu.refused[day]||{};
-      rows+=`<tr><td>${esc(day)}</td><td>${esc(r.message||r.error||'refused')}</td><td>${esc(r.code||'—')}</td></tr>`;
+      rows+=`<tr><td>${esc(day)}</td><td>${esc(String(r.message||r.error||'refused'))}</td><td>${esc(String(r.code||'—'))}</td></tr>`;
     }
     html+=`<table><thead><tr><th>Day</th><th>Reason</th><th>Code</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
