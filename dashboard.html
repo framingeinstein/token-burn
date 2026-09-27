@@ -69,6 +69,7 @@
 <section><h2>Cursor billed usage</h2><div class="hint">daily aggregate usage events from Cursor's dashboard API; no raw events or credentials are retained.</div><div id="cursorBilling"></div></section>
 <section><h2>Cursor local activity</h2><div class="hint">sessions and latest context-window occupancy — activity signals, not billed tokens.</div><div id="cursorActivity"></div></section>
 <section><h2>Efficiency</h2><div class="hint" id="efficiencyHint"></div><div id="efficiency"></div></section>
+<section><h2>Outcomes</h2><div class="hint" id="outcomesHint"></div><div id="outcomes"></div></section>
 <footer id="foot"></footer>
 
 <script>
@@ -331,6 +332,93 @@ function drawEfficiency(){
   host.innerHTML=html;
 }
 
+// ---------- outcomes (spec Sec3C/Sec6.3: cost per complexity point, validity, -----------
+// ---------- coverage — Amendment A-3 "Me" view: hands-on + commissioned factory $ ------
+function fmtUsd(v){ if(v==null) return '—'; return '$'+(Math.abs(v)>=1000?(v/1000).toFixed(1)+'K':v.toFixed(2)); }
+function covLine(cov){
+  if(!cov || !cov.total) return 'covers 0 of 0 — no data yet';
+  return `covers ${cov.counted} of ${cov.total} (${cov.pct==null?'—':cov.pct+'%'})`;
+}
+function outcomeTile(value,label,cov){
+  return `<div style="min-width:160px"><strong>${value}</strong><div style="color:var(--muted);font-size:12px">${esc(label)}</div><div style="color:var(--muted);font-size:11px;margin-top:2px">${esc(covLine(cov))}</div></div>`;
+}
+function validityBadge(v){
+  if(!v || !v.badge) return '';
+  return `<span style="margin-left:6px;padding:1px 6px;border-radius:10px;background:#fdecea;color:#b3261e;font-size:11px" title="ρ &lt; 0.3 or n &lt; 15">low confidence</span>`;
+}
+function drawOutcomes(){
+  const out=DATA.outcomes, host=document.getElementById('outcomes'), hint=document.getElementById('outcomesHint');
+  if(!out || out.available===false){
+    hint.textContent = (out && out.reason) ? `outcomes unavailable — ${out.reason}` : 'outcomes unavailable.';
+    host.innerHTML='';
+    return;
+  }
+  hint.textContent = `outcomes as of ${out.outcomes_as_of||'—'} — your hands-on spend plus the factory work you commissioned ("Me" view).`;
+
+  const t=out.tiles;
+  let html='<div style="display:flex;gap:28px;flex-wrap:wrap;margin-bottom:8px">';
+  html+=outcomeTile(t.points_shipped_this_week.points, 'points shipped this week', t.points_shipped_this_week.coverage);
+  html+=outcomeTile(t.cost_per_point.median==null?'—':`${fmtUsd(t.cost_per_point.median)} (p90 ${fmtUsd(t.cost_per_point.p90)})`, '$/pt median (p90)', t.cost_per_point.coverage);
+  html+=outcomeTile(fmtPct(t.durable_merge_rate.rate), 'durable-merge rate', t.durable_merge_rate.coverage);
+  html+=outcomeTile('—', 'rework share', t.rework_share.coverage);
+  html+=outcomeTile(fmtUsd(t.dead_end_usd.usd), 'dead-end $', null);
+  html+='</div>';
+  html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:4px">rework share: ${esc(t.rework_share.note)}</div>`;
+  html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:16px">dead-end $: ${esc(t.dead_end_usd.note)}</div>`;
+
+  html+='<div style="color:var(--muted);font-size:12px;margin-bottom:4px">per repo — points shipped, $/pt, validity</div>';
+  let repoRows='';
+  for(const r of out.per_repo){
+    repoRows+=`<tr><td>${esc(r.repo)}</td><td class="num">${r.points_shipped}</td>
+      <td class="num">${r.cost_per_point.median==null?'—':fmtUsd(r.cost_per_point.median)}</td>
+      <td class="num">${r.cost_per_point.p90==null?'—':fmtUsd(r.cost_per_point.p90)}</td>
+      <td>${esc(covLine(r.cost_per_point.coverage))}</td>
+      <td class="num">${r.validity.rho==null?'—':r.validity.rho.toFixed(2)} (n=${r.validity.n})${validityBadge(r.validity)}</td></tr>`;
+  }
+  html+=`<table><thead><tr><th>Repo</th><th class="num">Points shipped</th><th class="num">$/pt median</th><th class="num">$/pt p90</th><th>Coverage</th><th class="num">Validity ρ</th></tr></thead>
+    <tbody>${repoRows||'<tr><td colspan="6" style="color:var(--muted)">no shipped issues yet.</td></tr>'}</tbody></table>`;
+
+  html+='<div style="color:var(--muted);font-size:12px;margin:18px 0 4px">autonomy — factory share of points shipped, human $ per factory-shipped point</div>';
+  if(out.autonomy_trend.length){
+    let atRows='';
+    for(const w of out.autonomy_trend){
+      atRows+=`<tr><td>${esc(w.week)}</td><td class="num">${w.factory_pts}/${w.total_pts}</td>
+        <td class="num">${fmtPct(w.factory_share)}</td><td class="num">${w.human_usd_per_factory_pt==null?'—':fmtUsd(w.human_usd_per_factory_pt)}</td></tr>`;
+    }
+    html+=`<table><thead><tr><th>Week</th><th class="num">Factory / total pts</th><th class="num">Factory share</th><th class="num">Human $/factory pt</th></tr></thead><tbody>${atRows}</tbody></table>`;
+  } else {
+    html+='<div style="color:var(--muted)">no shipped, rated issues yet.</div>';
+  }
+
+  html+='<div style="color:var(--muted);font-size:12px;margin:18px 0 4px">dead-end $ — top 10, linked</div>';
+  if(out.dead_end_list.length){
+    let deRows='';
+    for(const d of out.dead_end_list){
+      const label = d.type==='issue' ? `issue #${d.number}` : `branch ${d.branch}`;
+      deRows+=`<tr><td>${esc(d.repo)}</td><td><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(label)}</a></td><td class="num">${fmtUsd(d.usd)}</td></tr>`;
+    }
+    html+=`<table><thead><tr><th>Repo</th><th>Issue / branch</th><th class="num">$</th></tr></thead><tbody>${deRows}</tbody></table>`;
+  } else {
+    html+='<div style="color:var(--muted)">none yet.</div>';
+  }
+
+  html+='<div style="color:var(--muted);font-size:12px;margin:18px 0 4px">model fit — Opus/Fable $ on issues rated ≤2 pts (candidates, not a score)</div>';
+  if(out.model_fit.length){
+    let mfRows='';
+    for(const m of out.model_fit){
+      mfRows+=`<tr><td>${esc(m.repo)}</td><td class="num">#${m.issue}</td><td class="num">${m.pts}</td><td>${esc(m.model_class)}</td><td class="num">${fmtUsd(m.cost_usd)}</td></tr>`;
+    }
+    html+=`<table><thead><tr><th>Repo</th><th class="num">Issue</th><th class="num">Pts</th><th>Model</th><th class="num">$</th></tr></thead><tbody>${mfRows}</tbody></table>`;
+  } else {
+    html+='<div style="color:var(--muted)">no candidates yet.</div>';
+  }
+
+  const ua=out.unattributed;
+  html+=`<div style="color:var(--muted);font-size:12px;margin-top:18px">unattributed (planning, review, ops): ${fmtUsd(ua.unattributed_usd)} of ${fmtUsd(ua.total_usd)} (${ua.pct==null?'—':ua.pct+'%'})</div>`;
+
+  host.innerHTML=html;
+}
+
 // ---------- header + wiring ----------
 function drawHeader(){
   const days=activeDays();
@@ -345,7 +433,7 @@ function drawHeader(){
   document.getElementById('foot').textContent=
     `Claude: ~/.claude/projects, deduped by message.id, API-equivalent cost. Cursor: local activity plus daily aggregate usage events; Cursor cost uses chargedCents. Raw Cursor events and credentials are never stored.`;
 }
-function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); drawCursorBilling(); drawCursorActivity(); drawEfficiency(); }
+function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); drawCursorBilling(); drawCursorActivity(); drawEfficiency(); drawOutcomes(); }
 
 document.getElementById('toggle').addEventListener('click', e=>{
   const b=e.target.closest('button'); if(!b) return;

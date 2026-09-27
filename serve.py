@@ -22,11 +22,36 @@ from cursor_local import read_cursor_activity
 from cursor_usage import load_cursor_usage
 from efficiency import build_efficiency_payload, collect_usage_records
 from usage_records import resolve_actor as resolve_usage_actor
+from outcomes import DEFAULT_CACHE_DIR, cache_paths, read_jsonl_latest, read_state
+from outcome_metrics import actor_login, build_outcomes_payload
 
 HERE = Path(__file__).parent
 DEFAULT_CURSOR_DB = Path(
     "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
 ).expanduser()
+
+
+def build_outcomes_section(cache_dir, records, today, me_login):
+    """The `outcomes` top-level payload key (controller ruling R3). serve.py
+    only READS the outcome cache here -- never GitHub (spec Sec5.2: fetching
+    is `outcomes.py`'s job, run out-of-band by cron). No cache yet (or no
+    cache configured) degrades to `{"available": False, "reason": ...}`
+    rather than raising (spec Sec8), same convention as the Cursor
+    sub-payloads above; the rest of the dashboard is unaffected."""
+    if not cache_dir:
+        return {"available": False, "reason": "no outcomes cache configured"}
+    paths = cache_paths(cache_dir)
+    if not paths["issues"].exists() and not paths["prs"].exists():
+        return {"available": False,
+                "reason": "no outcome cache yet -- run python3 outcomes.py to fetch it"}
+    state = read_state(paths["state"])
+    issues = list(read_jsonl_latest(paths["issues"], lambda r: (r["repo"], r["number"])).values())
+    prs = list(read_jsonl_latest(paths["prs"], lambda r: (r["repo"], r["number"])).values())
+    payload = build_outcomes_payload(
+        records, issues, prs, as_of=today, outcomes_as_of=state.get("outcomes_as_of"),
+        me_login=me_login)
+    payload["available"] = True
+    return payload
 
 
 def build_payload(cfg):
@@ -48,6 +73,8 @@ def build_payload(cfg):
         repo_map=cfg.get("repo_map"),
     )
     payload["efficiency"] = build_efficiency_payload(usage_records)
+    payload["outcomes"] = build_outcomes_section(
+        cfg.get("outcomes_cache_dir"), usage_records, today, actor_login(cfg.get("actor")))
     return payload
 
 
@@ -111,6 +138,9 @@ def main():
                     help="where finalized usage/<day>.jsonl records are read from")
     ap.add_argument("--actor", default=None,
                     help="GitHub login for human:<login> usage records; default: gh api user")
+    ap.add_argument("--outcomes-cache-dir", default=str(DEFAULT_CACHE_DIR),
+                    help="where the outcome cache (issues.jsonl/prs.jsonl/state.json, "
+                         "written by outcomes.py) is read from -- never fetched here")
     ap.add_argument("--port", type=int, default=8799)
     args = ap.parse_args()
 
@@ -131,6 +161,7 @@ def main():
         "factory_root": args.factory_root,
         "usage_dir": args.usage_dir,
         "actor": actor,
+        "outcomes_cache_dir": args.outcomes_cache_dir,
         "today": None,
     }
     port = choose_port(args.port, 20, _port_free)

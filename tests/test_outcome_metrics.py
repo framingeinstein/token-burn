@@ -1,0 +1,436 @@
+# tests/test_outcome_metrics.py — Outcomes section metric math (spec §3, §6.3, §6.5;
+# Amendment 2026-09-27: the local dashboard shows the "Me" view — hands-on spend plus
+# factory work this developer commissioned; everything else is out of scope, per
+# controller ruling R9).
+import math
+
+import pytest
+
+from outcome_metrics import (
+    actor_login,
+    autonomy_trend,
+    build_outcomes_payload,
+    coverage,
+    cost_per_point_stats,
+    dead_end_payload,
+    durable_merge_rate,
+    iso_week,
+    median,
+    model_fit_candidates,
+    p90,
+    per_repo_table,
+    points_shipped_this_week,
+    points_validity,
+    scope_to_me,
+    shipped_issue_rows,
+    spearman_rho,
+    unattributed_summary,
+    validity_badge,
+)
+
+
+def usage_record(**over):
+    r = {
+        "v": 1, "day": "2026-09-01", "actor": "human:jason", "on_behalf_of": None,
+        "requester_source": None, "repo": "o/r", "branch": "feat/10-x", "issue": None,
+        "session": "s1", "model": "claude-sonnet-4", "model_class": "sonnet",
+        "kind": "interactive", "calls": 1, "in": 10, "out": 10, "cc": 0, "cr": 0,
+        "cost_usd": 1.0, "ctx_buckets": {},
+    }
+    r.update(over)
+    return r
+
+
+def pr(**over):
+    r = {
+        "repo": "o/r", "number": 20, "author": "jason", "head_ref": "feat/10-x",
+        "state": "merged", "merged_at": "2026-09-02T00:00:00Z", "closes": [10],
+        "reverted_by": None, "reverts": None, "review_rounds": 1,
+    }
+    r.update(over)
+    return r
+
+
+def issue(**over):
+    r = {
+        "repo": "o/r", "number": 10, "author": "jason", "requested_by": "jason",
+        "requester_source": "requested_by", "state": "closed", "state_reason": "completed",
+        "closed_at": "2026-09-02T00:00:00Z", "reopened_at": [], "pts": 3,
+        "pts_source": None, "labels": ["pts:3"], "approved_by": None,
+    }
+    r.update(over)
+    return r
+
+
+# --- median / p90: hand-computed, standard linear-interpolation percentile -----------
+
+def test_median_even_count_averages_middle_two():
+    assert median([1, 2, 3, 4]) == 2.5
+
+
+def test_median_odd_count():
+    assert median([1, 2, 3]) == 2
+
+
+def test_median_empty_is_none():
+    assert median([]) is None
+
+
+def test_p90_hand_computed():
+    assert p90(list(range(1, 11))) == pytest.approx(9.1)
+
+
+def test_p90_single_value():
+    assert p90([5]) == 5
+
+
+# --- Spearman rho with ties -----------------------------------------------------------
+
+def test_spearman_rho_no_ties_hand_computed():
+    # ranks x=[1,2,3], ranks y=[1,3,2] -> rho = 0.5 (hand-derived, see module docstring math)
+    rho, n = spearman_rho([1, 2, 3], [10, 30, 20])
+    assert rho == pytest.approx(0.5)
+    assert n == 3
+
+
+def test_spearman_rho_with_ties_uses_average_rank():
+    # x=[1,1,2] ties at rank 1.5/1.5, y=[10,20,30] no ties -> rho = 1.5/sqrt(3)
+    rho, n = spearman_rho([1, 1, 2], [10, 20, 30])
+    assert rho == pytest.approx(1.5 / math.sqrt(3))
+    assert n == 3
+
+
+def test_spearman_rho_perfect_correlation():
+    rho, n = spearman_rho([1, 2, 3, 4], [10, 20, 30, 40])
+    assert rho == pytest.approx(1.0)
+
+
+def test_spearman_rho_no_variance_is_none():
+    rho, n = spearman_rho([1, 1, 1], [10, 20, 30])
+    assert rho is None
+    assert n == 3
+
+
+def test_spearman_rho_too_few_points_is_none():
+    rho, n = spearman_rho([1], [10])
+    assert rho is None
+    assert n == 1
+
+
+# --- validity badge: rho < 0.3 or n < 15 -----------------------------------------------
+
+def test_validity_badge_low_rho_warns():
+    assert validity_badge(0.2, 20) is True
+
+
+def test_validity_badge_low_n_warns():
+    assert validity_badge(0.9, 10) is True
+
+
+def test_validity_badge_none_rho_warns():
+    assert validity_badge(None, 3) is True
+
+
+def test_validity_badge_clean():
+    assert validity_badge(0.5, 20) is False
+
+
+# --- coverage --------------------------------------------------------------------------
+
+def test_coverage_line():
+    assert coverage(3, 10) == {"counted": 3, "total": 10, "pct": 30.0}
+
+
+def test_coverage_zero_total_is_none_pct():
+    assert coverage(0, 0) == {"counted": 0, "total": 0, "pct": None}
+
+
+# --- shipped_issue_rows: pulls pts/closed_at onto the T4 issue_rollups ------------------
+
+def test_shipped_issue_rows_only_includes_shipped():
+    rollups = {
+        ("o/r", 10): {"attributed_usd": 4.0, "shipped": True, "requester": "jason", "requester_source": "requested_by"},
+        ("o/r", 11): {"attributed_usd": 1.0, "shipped": False, "requester": None, "requester_source": None},
+    }
+    rows = shipped_issue_rows(rollups, [issue(number=10, pts=3), issue(number=11, pts=5, state_reason="not_planned")])
+    assert [r["number"] for r in rows] == [10]
+    assert rows[0]["pts"] == 3
+    assert rows[0]["attributed_usd"] == 4.0
+    assert rows[0]["closed_at"] == "2026-09-02T00:00:00Z"
+
+
+# --- $/pt: unrated/missing pts excluded from the ratio but counted in coverage ---------
+
+def test_cost_per_point_excludes_unrated_but_counts_coverage():
+    rows = [
+        {"repo": "o/r", "number": 1, "pts": 2, "attributed_usd": 4.0, "closed_at": "2026-09-01T00:00:00Z"},
+        {"repo": "o/r", "number": 2, "pts": None, "attributed_usd": 9.0, "closed_at": "2026-09-01T00:00:00Z"},
+    ]
+    stats = cost_per_point_stats(rows)
+    assert stats["median"] == 2.0  # only the rated row (4.0/2) enters the ratio
+    assert stats["coverage"] == {"counted": 1, "total": 2, "pct": 50.0}
+
+
+def test_cost_per_point_median_and_p90_over_several_issues():
+    rows = [
+        {"repo": "o/r", "number": i, "pts": 1, "attributed_usd": v, "closed_at": "2026-09-01T00:00:00Z"}
+        for i, v in enumerate([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], start=1)
+    ]
+    stats = cost_per_point_stats(rows)
+    assert stats["median"] == pytest.approx(5.5)
+    assert stats["p90"] == pytest.approx(9.1)
+
+
+def test_cost_per_point_no_rated_rows_is_none():
+    rows = [{"repo": "o/r", "number": 1, "pts": None, "attributed_usd": 4.0, "closed_at": None}]
+    stats = cost_per_point_stats(rows)
+    assert stats["median"] is None
+    assert stats["p90"] is None
+    assert stats["coverage"] == {"counted": 0, "total": 1, "pct": 0.0}
+
+
+# --- points validity: Spearman over the population, badge on rho<0.3 or n<15 -----------
+
+def test_points_validity_excludes_unrated_rows():
+    rows = [
+        {"repo": "o/r", "number": 1, "pts": 1, "attributed_usd": 10.0, "closed_at": "2026-09-01T00:00:00Z"},
+        {"repo": "o/r", "number": 2, "pts": None, "attributed_usd": 999.0, "closed_at": "2026-09-01T00:00:00Z"},
+        {"repo": "o/r", "number": 3, "pts": 2, "attributed_usd": 20.0, "closed_at": "2026-09-01T00:00:00Z"},
+    ]
+    result = points_validity(rows, as_of="2026-09-15")
+    assert result["n"] == 2
+    assert result["rho"] == pytest.approx(1.0)
+    assert result["badge"] is True  # n < 15
+
+
+def test_points_validity_windows_to_90_days():
+    rows = [
+        {"repo": "o/r", "number": 1, "pts": 1, "attributed_usd": 10.0, "closed_at": "2026-01-01T00:00:00Z"},
+        {"repo": "o/r", "number": 2, "pts": 2, "attributed_usd": 20.0, "closed_at": "2026-09-01T00:00:00Z"},
+    ]
+    result = points_validity(rows, as_of="2026-09-15", window_days=90)
+    assert result["n"] == 1  # the January issue falls outside the 90-day window
+
+
+# --- per_repo_table -----------------------------------------------------------------
+
+def test_per_repo_table_groups_and_flags_validity():
+    rows = [
+        {"repo": "o/a", "number": 1, "pts": 1, "attributed_usd": 10.0, "closed_at": "2026-09-01T00:00:00Z"},
+        {"repo": "o/a", "number": 2, "pts": 2, "attributed_usd": 20.0, "closed_at": "2026-09-01T00:00:00Z"},
+        {"repo": "o/b", "number": 3, "pts": 3, "attributed_usd": 9.0, "closed_at": "2026-09-01T00:00:00Z"},
+    ]
+    table = per_repo_table(rows, as_of="2026-09-15")
+    assert [r["repo"] for r in table] == ["o/a", "o/b"]
+    a = table[0]
+    assert a["points_shipped"] == 3
+    assert a["validity"]["badge"] is True  # n=2 < 15
+    assert a["cost_per_point"]["median"] == pytest.approx(10.0)
+
+
+# --- durable merge rate ----------------------------------------------------------------
+
+def test_durable_merge_rate_hand_computed():
+    pr_rollups = {
+        ("o/r", 1): {"durable": True}, ("o/r", 2): {"durable": True}, ("o/r", 3): {"durable": False},
+        ("o/r", 4): {"durable": None},  # never merged -- excluded from the rate
+    }
+    result = durable_merge_rate(pr_rollups)
+    assert result["rate"] == pytest.approx(2 / 3)
+    assert result["coverage"] == {"counted": 3, "total": 3, "pct": 100.0}
+
+
+def test_durable_merge_rate_no_merged_prs_is_none():
+    result = durable_merge_rate({("o/r", 1): {"durable": None}})
+    assert result["rate"] is None
+
+
+# --- dead-end $: not_planned issues + stale local branches, top 10 by $, linked -------
+
+def test_dead_end_payload_combines_and_sorts_and_links():
+    issue_rollups = {("o/r", 5): {"attributed_usd": 12.0}}
+    not_planned = [issue(number=5, state_reason="not_planned")]
+    records = [usage_record(repo="o/r", branch="feat/99-x", cost_usd=3.0, kind="interactive")]
+    stale = [("o/r", "feat/99-x")]
+    result = dead_end_payload(issue_rollups, not_planned, records, stale)
+    assert result["usd"] == pytest.approx(15.0)
+    assert result["top"][0]["usd"] == pytest.approx(12.0)
+    assert result["top"][0]["url"] == "https://github.com/o/r/issues/5"
+    assert result["top"][1]["url"] == "https://github.com/o/r/tree/feat/99-x"
+    assert "no data yet" in result["excluded_note"] or "factory#109" in result["excluded_note"]
+
+
+def test_dead_end_payload_caps_at_ten():
+    not_planned = [issue(number=n, state_reason="not_planned") for n in range(1, 13)]
+    issue_rollups = {("o/r", n): {"attributed_usd": float(n)} for n in range(1, 13)}
+    result = dead_end_payload(issue_rollups, not_planned, [], [])
+    assert len(result["top"]) == 10
+    assert result["top"][0]["usd"] == 12.0  # highest first
+
+
+# --- points shipped this week -----------------------------------------------------------
+
+def test_points_shipped_this_week_only_counts_the_current_iso_week():
+    rows = [
+        {"repo": "o/r", "number": 1, "pts": 3, "attributed_usd": 1.0, "closed_at": "2026-09-14T00:00:00Z"},  # Monday of the week containing 2026-09-15
+        {"repo": "o/r", "number": 2, "pts": 5, "attributed_usd": 1.0, "closed_at": "2026-08-01T00:00:00Z"},  # a different week
+    ]
+    result = points_shipped_this_week(rows, as_of="2026-09-15")
+    assert result["points"] == 3
+
+
+def test_points_shipped_this_week_unrated_counted_in_coverage_not_points():
+    rows = [
+        {"repo": "o/r", "number": 1, "pts": None, "attributed_usd": 1.0, "closed_at": "2026-09-14T00:00:00Z"},
+    ]
+    result = points_shipped_this_week(rows, as_of="2026-09-15")
+    assert result["points"] == 0
+    assert result["coverage"] == {"counted": 0, "total": 1, "pct": 0.0}
+
+
+def test_iso_week_format():
+    assert iso_week("2026-09-15") == "2026-W38"
+
+
+# --- autonomy trend: factory share of points shipped + human $ per factory-shipped pt --
+
+def test_autonomy_trend_factory_share_and_human_cost_per_point():
+    records = [
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None, issue=10, repo="o/r", cost_usd=2.0),
+        usage_record(actor="human:jason", kind="interactive", branch="feat/10-x", repo="o/r", cost_usd=1.0),
+    ]
+    attributions = [
+        {"pr": None, "issue": ("o/r", 10), "requester": "jason", "requester_source": "requested_by", "attributed": True},
+        {"pr": ("o/r", 20), "issue": ("o/r", 10), "requester": "jason", "requester_source": "requested_by", "attributed": True},
+    ]
+    rows = [{"repo": "o/r", "number": 10, "pts": 4, "attributed_usd": 3.0, "closed_at": "2026-09-02T00:00:00Z"}]
+    trend = autonomy_trend(records, attributions, rows)
+    assert len(trend) == 1
+    week = trend[0]
+    assert week["factory_pts"] == 4
+    assert week["total_pts"] == 4
+    assert week["factory_share"] == 1.0
+    assert week["human_usd_per_factory_pt"] == pytest.approx(1.0 / 4)
+
+
+def test_autonomy_trend_non_factory_issue_has_zero_share():
+    rows = [{"repo": "o/r", "number": 10, "pts": 4, "attributed_usd": 3.0, "closed_at": "2026-09-02T00:00:00Z"}]
+    trend = autonomy_trend([], [], rows)
+    assert trend[0]["factory_pts"] == 0
+    assert trend[0]["factory_share"] == 0.0
+    assert trend[0]["human_usd_per_factory_pt"] is None
+
+
+# --- model fit: Opus/Fable $ joined to an issue rated <=2 pts, unjoined excluded --------
+
+def test_model_fit_candidates_filters_by_model_class_and_pts():
+    records = [
+        usage_record(model_class="opus", cost_usd=5.0, session="s-opus"),
+        usage_record(model_class="sonnet", cost_usd=5.0, session="s-sonnet"),  # wrong model class
+        usage_record(model_class="fable", cost_usd=2.0, session="s-fable"),
+    ]
+    attributions = [
+        {"pr": None, "issue": ("o/r", 10), "requester": "jason", "requester_source": "requested_by", "attributed": True},
+        {"pr": None, "issue": ("o/r", 10), "requester": "jason", "requester_source": "requested_by", "attributed": True},
+        {"pr": None, "issue": ("o/r", 11), "requester": "jason", "requester_source": "requested_by", "attributed": True},
+    ]
+    issues = [issue(number=10, pts=2), issue(number=11, pts=5)]  # 11 is too complex, excluded
+    candidates = model_fit_candidates(records, attributions, issues)
+    assert len(candidates) == 1
+    assert candidates[0]["session"] == "s-opus"
+    assert candidates[0]["pts"] == 2
+
+
+def test_model_fit_candidates_excludes_unjoined_sessions():
+    records = [usage_record(model_class="opus", cost_usd=5.0)]
+    attributions = [{"pr": None, "issue": None, "requester": None, "requester_source": None, "attributed": False}]
+    assert model_fit_candidates(records, attributions, [issue()]) == []
+
+
+# --- unattributed slice: always shown with its $ share ----------------------------------
+
+def test_unattributed_summary_hand_computed():
+    records = [usage_record(cost_usd=3.0), usage_record(cost_usd=1.0)]
+    attributions = [{"attributed": True}, {"attributed": False}]
+    result = unattributed_summary(records, attributions)
+    assert result == {"unattributed_usd": 1.0, "total_usd": 4.0, "pct": 25.0}
+
+
+def test_unattributed_summary_zero_spend_is_none_pct():
+    assert unattributed_summary([], [])["pct"] is None
+
+
+# --- Amendment A-3 "Me" scoping: hands-on always in, factory only when I requested it ---
+
+def test_actor_login_strips_human_prefix():
+    assert actor_login("human:jason") == "jason"
+    assert actor_login(None) is None
+
+
+def test_scope_to_me_keeps_all_interactive_records():
+    records = [usage_record(kind="interactive")]
+    attrs = [{"attributed": False, "requester": None}]
+    scoped_r, scoped_a = scope_to_me(records, attrs, "jason")
+    assert scoped_r == records
+
+
+def test_scope_to_me_keeps_factory_records_i_commissioned():
+    records = [usage_record(actor="factory:wb-impl-r", kind="unknown")]
+    attrs = [{"attributed": True, "requester": "jason"}]
+    scoped_r, scoped_a = scope_to_me(records, attrs, "jason")
+    assert scoped_r == records
+
+
+def test_scope_to_me_drops_factory_records_someone_else_commissioned():
+    records = [usage_record(actor="factory:wb-impl-r", kind="unknown")]
+    attrs = [{"attributed": True, "requester": "ricky"}]
+    scoped_r, scoped_a = scope_to_me(records, attrs, "jason")
+    assert scoped_r == []
+
+
+def test_scope_to_me_drops_unattributed_factory_records():
+    # can't confirm it's mine -- excluded rather than shown as unattributed noise
+    records = [usage_record(actor="factory:wb-impl-r", kind="unknown")]
+    attrs = [{"attributed": False, "requester": None}]
+    scoped_r, scoped_a = scope_to_me(records, attrs, "jason")
+    assert scoped_r == []
+
+
+def test_scope_to_me_no_login_drops_all_factory_records():
+    records = [usage_record(kind="interactive"), usage_record(actor="factory:x", kind="unknown")]
+    attrs = [{"attributed": False, "requester": None}, {"attributed": True, "requester": "jason"}]
+    scoped_r, scoped_a = scope_to_me(records, attrs, None)
+    assert len(scoped_r) == 1
+    assert scoped_r[0]["kind"] == "interactive"
+
+
+# --- build_outcomes_payload: full assembly, rescoped dollars, honest coverage ------------
+
+def test_build_outcomes_payload_rescopes_dollars_to_me():
+    # jason's own session ($1) plus a factory session HE commissioned ($2) plus a
+    # factory session RICKY commissioned on the same repo ($100, must not leak in).
+    records = [
+        usage_record(actor="human:jason", kind="interactive", branch="feat/10-x", repo="o/r", cost_usd=1.0),
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None, issue=10, repo="o/r", cost_usd=2.0),
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None, issue=11, repo="o/r", cost_usd=100.0),
+    ]
+    issues = [issue(number=10, pts=2, requested_by="jason"),
+              issue(number=11, pts=2, requested_by="ricky")]
+    prs = [pr(number=20, closes=[10])]
+    payload = build_outcomes_payload(records, issues, prs, as_of="2026-09-15",
+                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+    assert payload["outcomes_as_of"] == "2026-09-15T00:00:00Z"
+    # issue 10 (mine): $1 + $2 = $3 attributed; issue 11 (ricky's, dropped) never appears
+    per_repo = payload["per_repo"][0]
+    assert per_repo["repo"] == "o/r"
+    # $/pt median over rated rows: issue 10 -> 3.0/2 = 1.5 ; issue 11 excluded entirely
+    assert per_repo["cost_per_point"]["median"] == pytest.approx(1.5)
+    assert per_repo["cost_per_point"]["coverage"]["total"] == 1  # only issue 10 shipped+scoped
+
+
+def test_build_outcomes_payload_shape_has_all_sections():
+    payload = build_outcomes_payload([], [], [], as_of="2026-09-15", outcomes_as_of=None, me_login="jason")
+    for key in ("outcomes_as_of", "tiles", "per_repo", "autonomy_trend", "dead_end_list", "model_fit", "unattributed"):
+        assert key in payload
+    assert payload["tiles"]["rework_share"]["share"] is None
+    assert "no data yet" in payload["tiles"]["rework_share"]["note"] or "factory#109" in payload["tiles"]["rework_share"]["note"]

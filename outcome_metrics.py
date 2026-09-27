@@ -1,0 +1,478 @@
+"""Outcomes section metric math (spec Sec3C, Sec6.3, Sec6.5, Sec8).
+
+Pure functions only -- no I/O, no GitHub, no filesystem. `serve.py` reads the
+outcome cache (spec Sec4.2: `outcomes/state.json` + `issues.jsonl`/`prs.jsonl`
+via `outcomes.cache_paths`/`read_jsonl_latest`/`read_state`) and hands the
+resulting lists to `build_outcomes_payload` here, alongside the SAME usage
+records `efficiency.collect_usage_records` already collected for the
+`efficiency` payload key (no second collection pass -- serve.py's latency
+budget, spec Sec10 "Performance").
+
+This module is deliberately import-only-what-you-need from `attribution.py`
+(T4) rather than re-implementing the joins: `attribute_records`/`build_join`
+for the PR->issue->requester chain, `not_planned_issues`/`stale_branches` for
+the dead-end inputs. The Synkhos factory snapshot job (synkhos/factory#172)
+is meant to import this module directly so its numbers agree with this
+dashboard's.
+
+Amendment 2026-09-27 (controller ruling R9): team data lives in the Synkhos
+console, so THIS local dashboard shows the local user's "Me" view -- their own
+hands-on spend, plus factory work they commissioned (a factory record whose
+resolved requester, per `attribution.attribute_record`, is them). A factory
+record commissioned by someone else, or one whose requester can't be resolved
+(unjoined), is out of scope for a personal dashboard: it is dropped rather
+than folded into "unattributed" here (`scope_to_me`). Every $-shaped metric
+below is computed over the SCOPED population; `shipped`/`durable` verdicts
+(properties of the issue/PR themselves, not of who paid) still come from the
+full T4 join across every known issue and PR.
+
+Ruling R5: `pts:` labels don't exist yet on live issues (the factory rater,
+synkhos/factory#166, isn't built) -- $/pt coverage on real data will be near
+0%, honestly reported via `coverage()`, never fabricated or hidden as an
+error (spec Sec8 "Missing, unrated or rater-error pts -> excluded from $/pt,
+included in coverage").
+
+Rework share (ci-fix/conflict $ over impl $) has NO DATA until the factory
+turn kind is known (synkhos/factory#109) -- `build_outcomes_payload`'s
+`tiles.rework_share` is always `{"share": None, ...}` with an explicit note,
+never a made-up number. Likewise "dead-end $" only ever counts issues closed
+`not_planned` and stale local branches (T4's own seams); factory
+timeouts/escalations have no data source yet and are named as excluded.
+"""
+import math
+from collections import defaultdict
+from datetime import date, datetime
+
+from attribution import attribute_records, build_join, not_planned_issues, stale_branches
+
+_MODEL_FIT_MODEL_CLASSES = ("opus", "fable")
+_MODEL_FIT_PTS_CEILING = 2
+_VALIDITY_WINDOW_DAYS = 90
+_VALIDITY_MIN_RHO = 0.3
+_VALIDITY_MIN_N = 15
+_DEAD_END_TOP_N = 10
+_REWORK_SHARE_NOTE = ("no data yet -- factory turn kind (impl/ci-fix/conflict) is unknown "
+                      "until synkhos/factory#109 lands")
+_DEAD_END_EXCLUDED_NOTE = ("factory turn timeouts/escalations have no data yet "
+                           "(synkhos/factory#109); only issues closed not_planned and "
+                           "stale local branches (no merged PR 14 days after the last "
+                           "session) are counted")
+
+
+# --- distributions: median / p90 (spec principle: distributions, never means) ----------
+
+def percentile(values, p):
+    """Linear-interpolation percentile (the standard/numpy-default method); `None`
+    for an empty list."""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    if n == 1:
+        return s[0]
+    idx = p * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    frac = idx - lo
+    return s[lo] + (s[hi] - s[lo]) * frac
+
+
+def median(values):
+    return percentile(values, 0.5)
+
+
+def p90(values):
+    return percentile(values, 0.9)
+
+
+def coverage(counted, total):
+    """The Sec3C/Sec8 coverage line: how many of the eligible population actually
+    carried a rating/verdict. `pct` is `None` (not 0) when there's no population
+    at all to rate -- an honest "nothing to cover" distinct from "0% covered"."""
+    return {"counted": counted, "total": total,
+            "pct": round(100 * counted / total, 1) if total else None}
+
+
+# --- Spearman rho with ties (average-rank method) ---------------------------------------
+
+def _ranks(values):
+    """1-based ranks, tied values sharing their average rank."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg_rank = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg_rank
+        i = j + 1
+    return ranks
+
+
+def spearman_rho(xs, ys):
+    """`(rho, n)` -- Spearman's rank correlation (Pearson correlation of the
+    average ranks, so ties are handled without a separate tie-correction
+    formula). `rho` is `None` when there are fewer than 2 points or either
+    side has zero variance (e.g. every `pts` value is the same) -- undefined,
+    not zero."""
+    n = len(xs)
+    if n != len(ys) or n < 2:
+        return None, n
+    rx, ry = _ranks(xs), _ranks(ys)
+    mx, my = sum(rx) / n, sum(ry) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    denx = sum((a - mx) ** 2 for a in rx)
+    deny = sum((b - my) ** 2 for b in ry)
+    if denx == 0 or deny == 0:
+        return None, n
+    return num / math.sqrt(denx * deny), n
+
+
+def validity_badge(rho, n):
+    """spec Sec3C: warn when `rho < 0.3` or `n < 15`; an undefined `rho` (no
+    variance, or too few points) always warns."""
+    return rho is None or rho < _VALIDITY_MIN_RHO or n < _VALIDITY_MIN_N
+
+
+# --- ISO week (Throughput / autonomy trend / "this week" tiles) ------------------------
+
+def iso_week(day):
+    """`"YYYY-Www"` for a `"YYYY-MM-DD"`-or-longer ISO date/timestamp string."""
+    y, w, _ = date.fromisoformat(day[:10]).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+# --- Amendment A-3: scope usage records + their attributions to "Me" -------------------
+
+def actor_login(actor):
+    """`"human:jason"` -> `"jason"`; `None` through untouched. Usage records and
+    the `--actor` config carry the `human:<login>` prefix (spec Sec4.1); an
+    issue's `requested_by` (spec Sec4.2) is the bare login, so this bridges
+    the two for the `scope_to_me` comparison."""
+    if not actor:
+        return None
+    return actor.split(":", 1)[1] if ":" in actor else actor
+
+
+def scope_to_me(records, attributions, me_login):
+    """Amendment A-3 / controller ruling R9: keep every hands-on (`interactive`)
+    record -- it's this machine's own session by construction -- plus a
+    factory record only when its resolved requester (T4's `attribute_record`)
+    is `me_login`. Everything else (someone else's commissioned factory work,
+    or factory work with no resolved requester) is dropped rather than folded
+    into "unattributed" -- a personal dashboard has no business showing it at
+    all. Returns `(records, attributions)`, aligned and filtered together."""
+    scoped_records, scoped_attrs = [], []
+    for record, attr in zip(records, attributions):
+        if record.get("kind") == "interactive":
+            scoped_records.append(record)
+            scoped_attrs.append(attr)
+        elif me_login and attr.get("requester") == me_login:
+            scoped_records.append(record)
+            scoped_attrs.append(attr)
+    return scoped_records, scoped_attrs
+
+
+# --- shipped issues: pts/closed_at onto the T4 issue_rollups ---------------------------
+
+def shipped_issue_rows(issue_rollups, issues):
+    """One row per SHIPPED issue (spec Sec3C: closed `completed` with a merged
+    PR linked, per T4's `is_shipped`): `{"repo","number","pts","closed_at",
+    "attributed_usd"}`. `pts`/`closed_at` come from the raw issue record;
+    `attributed_usd`/`shipped` from the (possibly Me-rescoped) rollup."""
+    issues_by_key = {(i["repo"], i["number"]): i for i in issues}
+    rows = []
+    for key, rollup in issue_rollups.items():
+        if not rollup.get("shipped"):
+            continue
+        issue = issues_by_key.get(key, {})
+        rows.append({
+            "repo": key[0], "number": key[1],
+            "pts": issue.get("pts"),
+            "closed_at": issue.get("closed_at"),
+            "attributed_usd": rollup.get("attributed_usd", 0.0),
+        })
+    return rows
+
+
+# --- $/pt: unrated/missing pts excluded from the ratio, counted in coverage ------------
+
+def cost_per_point_stats(rows):
+    """spec Sec3C: attributed $ / pts per issue, median and p90 of that ratio
+    across `rows` (a distribution over issues, never a sum-of-$/sum-of-pts).
+    Issues with `pts` unrated/missing are excluded from the ratio but counted
+    in `coverage` (spec Sec8)."""
+    rated = [r for r in rows if r.get("pts") is not None]
+    ratios = [r["attributed_usd"] / r["pts"] for r in rated if r["pts"]]
+    return {
+        "median": median(ratios),
+        "p90": p90(ratios),
+        "coverage": coverage(len(rated), len(rows)),
+    }
+
+
+def _closed_within_window(closed_at, as_of, window_days):
+    if not closed_at or not as_of:
+        return False
+    try:
+        closed = datetime.fromisoformat(closed_at.replace("Z", "+00:00")).date()
+    except Exception:
+        return False
+    as_of_date = date.fromisoformat(as_of[:10])
+    return closed <= as_of_date and (as_of_date - closed).days <= window_days
+
+
+def points_validity(rows, as_of=None, window_days=_VALIDITY_WINDOW_DAYS):
+    """spec Sec3C: Spearman rho between `pts` and attributed $ over the last
+    `window_days` of shipped issues (default 90). Unrated rows are excluded
+    from the correlation the same way they're excluded from $/pt."""
+    pool = rows
+    if as_of:
+        pool = [r for r in rows if _closed_within_window(r.get("closed_at"), as_of, window_days)]
+    rated = [r for r in pool if r.get("pts") is not None]
+    rho, n = spearman_rho([r["pts"] for r in rated], [r["attributed_usd"] for r in rated])
+    return {"rho": rho, "n": n, "badge": validity_badge(rho, n)}
+
+
+def per_repo_table(rows, as_of=None, window_days=_VALIDITY_WINDOW_DAYS):
+    """spec Sec6.3 per-repo table: points shipped, $/pt (median/p90 + coverage),
+    validity rho + its warning badge -- grouped by repo, repos alphabetical."""
+    by_repo = defaultdict(list)
+    for row in rows:
+        by_repo[row["repo"]].append(row)
+    table = []
+    for repo in sorted(by_repo):
+        repo_rows = by_repo[repo]
+        table.append({
+            "repo": repo,
+            "points_shipped": sum(r["pts"] for r in repo_rows if r.get("pts") is not None),
+            "cost_per_point": cost_per_point_stats(repo_rows),
+            "validity": points_validity(repo_rows, as_of=as_of, window_days=window_days),
+        })
+    return table
+
+
+# --- durable-merge rate: spec Sec3B ------------------------------------------------------
+
+def durable_merge_rate(pr_rollups):
+    """merged PRs with no revert and no reopen within 14 days, over merged PRs
+    (T4's `is_durable_merge`; `None` durability means the PR never merged and
+    is excluded, not counted as a failure). Coverage is the PRs actually known
+    to the outcome cache -- "PRs in configured orgs" per spec Sec3B."""
+    verdicts = [row["durable"] for row in pr_rollups.values() if row.get("durable") is not None]
+    if not verdicts:
+        return {"rate": None, "coverage": coverage(0, 0)}
+    durable = sum(1 for v in verdicts if v)
+    return {"rate": durable / len(verdicts), "coverage": coverage(len(verdicts), len(verdicts))}
+
+
+# --- dead-end $: not_planned issues + stale local branches, linked, top 10 -------------
+
+def issue_url(repo, number):
+    return f"https://github.com/{repo}/issues/{number}"
+
+
+def branch_url(repo, branch):
+    return f"https://github.com/{repo}/tree/{branch}"
+
+
+def dead_end_payload(issue_rollups, not_planned, records, stale_branch_keys):
+    """spec Sec3B "dead-end $": issues closed `not_planned` (their rescoped
+    attributed $) plus local branches with no merged PR 14 days after their
+    last session (the hands-on $ actually spent on that branch). Factory
+    timeouts/escalations have no data source yet (spec Sec8) and are named,
+    not silently omitted, in `excluded_note`."""
+    items = []
+    total = 0.0
+    for issue in not_planned:
+        key = (issue["repo"], issue["number"])
+        usd = issue_rollups.get(key, {}).get("attributed_usd", 0.0)
+        total += usd
+        items.append({"type": "issue", "repo": issue["repo"], "number": issue["number"],
+                      "usd": round(usd, 6), "url": issue_url(issue["repo"], issue["number"])})
+
+    stale_set = set(stale_branch_keys)
+    per_branch = defaultdict(float)
+    for r in records:
+        if r.get("kind") != "interactive":
+            continue
+        key = (r.get("repo"), r.get("branch"))
+        if key in stale_set:
+            per_branch[key] += r.get("cost_usd", 0) or 0
+    for (repo, branch), usd in per_branch.items():
+        total += usd
+        items.append({"type": "branch", "repo": repo, "branch": branch,
+                      "usd": round(usd, 6), "url": branch_url(repo, branch)})
+
+    items.sort(key=lambda x: x["usd"], reverse=True)
+    return {
+        "usd": round(total, 6),
+        "top": items[:_DEAD_END_TOP_N],
+        "excluded_note": _DEAD_END_EXCLUDED_NOTE,
+    }
+
+
+# --- points shipped this week (Throughput tile) -----------------------------------------
+
+def points_shipped_this_week(rows, as_of):
+    """spec Sec6.3 tile: rated points among issues shipped in `as_of`'s ISO
+    week; unrated issues shipped that week count in coverage, not in the
+    points total."""
+    week = iso_week(as_of)
+    in_week = [r for r in rows if r.get("closed_at") and iso_week(r["closed_at"]) == week]
+    rated = [r for r in in_week if r.get("pts") is not None]
+    return {
+        "points": sum(r["pts"] for r in rated),
+        "coverage": coverage(len(rated), len(in_week)),
+    }
+
+
+# --- autonomy trend: factory share of points shipped, human $/factory-shipped point -----
+
+def autonomy_trend(records, attributions, rows):
+    """spec Sec3C "Autonomy": per ISO week, the factory's share of rated points
+    shipped, and human hands-on $ spent on issues the factory touched (per
+    factory-shipped point) -- team-mode's per-requester breakdown (spec Sec6.3)
+    is out of scope for this single-user local dashboard (Amendment A-3)."""
+    rows_by_key = {(r["repo"], r["number"]): r for r in rows}
+    factory_touched = {a["issue"] for r, a in zip(records, attributions)
+                       if a.get("issue") and r.get("kind") != "interactive"}
+
+    weeks = defaultdict(lambda: {"factory_pts": 0, "total_pts": 0, "human_usd_on_factory_issues": 0.0})
+    for key, row in rows_by_key.items():
+        if row.get("pts") is None or not row.get("closed_at"):
+            continue
+        week = iso_week(row["closed_at"])
+        w = weeks[week]
+        w["total_pts"] += row["pts"]
+        if key in factory_touched:
+            w["factory_pts"] += row["pts"]
+
+    for record, attr in zip(records, attributions):
+        key = attr.get("issue")
+        if key in factory_touched and record.get("kind") == "interactive" and key in rows_by_key:
+            row = rows_by_key[key]
+            if row.get("closed_at"):
+                week = iso_week(row["closed_at"])
+                weeks[week]["human_usd_on_factory_issues"] += record.get("cost_usd", 0) or 0
+
+    out = []
+    for week in sorted(weeks):
+        w = weeks[week]
+        out.append({
+            "week": week,
+            "factory_pts": w["factory_pts"], "total_pts": w["total_pts"],
+            "factory_share": (w["factory_pts"] / w["total_pts"]) if w["total_pts"] else 0.0,
+            "human_usd_per_factory_pt": (round(w["human_usd_on_factory_issues"] / w["factory_pts"], 6)
+                                        if w["factory_pts"] else None),
+        })
+    return out
+
+
+# --- model fit: Opus/Fable $ joined to an issue rated <=2 pts (spec Sec3A, moved to T5) --
+
+def model_fit_candidates(records, attributions, issues):
+    """spec Sec3A "Model fit": Opus/Fable spend on sessions joined to an issue
+    rated `<= 2` pts; unjoined sessions are excluded. A table of candidates,
+    not a score -- the dashboard/caller decides what (if anything) to do with
+    an expensive model on a small card."""
+    issues_by_key = {(i["repo"], i["number"]): i for i in issues}
+    out = []
+    for record, attr in zip(records, attributions):
+        if record.get("model_class") not in _MODEL_FIT_MODEL_CLASSES:
+            continue
+        key = attr.get("issue")
+        if not key:
+            continue
+        issue = issues_by_key.get(key)
+        if not issue or issue.get("pts") is None or issue["pts"] > _MODEL_FIT_PTS_CEILING:
+            continue
+        out.append({
+            "repo": key[0], "issue": key[1], "pts": issue["pts"],
+            "model_class": record["model_class"],
+            "cost_usd": round(record.get("cost_usd", 0) or 0, 6),
+            "session": record.get("session"),
+        })
+    return out
+
+
+# --- unattributed slice: always shown with its $ share (spec Sec6.5) -------------------
+
+def unattributed_summary(records, attributions):
+    total = sum(r.get("cost_usd", 0) or 0 for r in records)
+    unattributed = sum(r.get("cost_usd", 0) or 0 for r, a in zip(records, attributions)
+                       if not a.get("attributed"))
+    return {
+        "unattributed_usd": round(unattributed, 6),
+        "total_usd": round(total, 6),
+        "pct": round(100 * unattributed / total, 1) if total else None,
+    }
+
+
+# --- top-level assembly: the `outcomes` payload key (T5 output contract) --------------
+
+def _rescope_issue_dollars(issue_rollups, scoped_records, scoped_attrs):
+    """T4's `issue_rollups` sum `attributed_usd` over EVERY usage record; the
+    "Me" view needs it summed over the SCOPED population only. `shipped` (and
+    any other non-dollar fact) is carried through unchanged -- it's a property
+    of the issue/PR, not of who paid."""
+    out = {key: dict(row, attributed_usd=0.0) for key, row in issue_rollups.items()}
+    for record, attr in zip(scoped_records, scoped_attrs):
+        key = attr.get("issue")
+        if key is None:
+            continue
+        if key not in out:
+            out[key] = {"attributed_usd": 0.0, "shipped": False,
+                       "requester": attr.get("requester"), "requester_source": attr.get("requester_source")}
+        out[key]["attributed_usd"] += record.get("cost_usd", 0) or 0
+    for row in out.values():
+        row["attributed_usd"] = round(row["attributed_usd"], 6)
+    return out
+
+
+def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login=None):
+    """The `outcomes` top-level payload key (controller ruling R3). `records`
+    is the SAME usage-record list `efficiency.collect_usage_records` already
+    built for the `efficiency` key (spec Sec10 performance budget: no second
+    collection pass). `issues`/`prs` are the outcome cache's structured
+    records (spec Sec4.2); `as_of` is a `"YYYY-MM-DD"` day string; `me_login`
+    is the bare GitHub login (`outcome_metrics.actor_login`) for the
+    Amendment A-3 "Me" scope.
+
+    Availability ("outcomes unavailable, with a reason" — spec Sec8) is a
+    server-side concern (serve.py checks whether the cache exists at all)
+    and is layered on top of this function's return value, not inside it.
+    """
+    full_attrs = attribute_records(records, prs, issues)
+    scoped_records, scoped_attrs = scope_to_me(records, full_attrs, me_login)
+
+    # shipped/durable are facts about the issue/PR itself (spec Sec3C/Sec3B),
+    # so they come from T4's join over the FULL population; dollar amounts are
+    # rebuilt over the scoped population only (Amendment A-3).
+    joined = build_join(records, issues, prs, as_of=as_of)
+    issue_rollups = _rescope_issue_dollars(joined["issue_rollups"], scoped_records, scoped_attrs)
+    pr_rollups = joined["pr_rollups"]
+
+    rows = shipped_issue_rows(issue_rollups, issues)
+    stale = stale_branches(scoped_records, prs, as_of)
+    dead_end = dead_end_payload(issue_rollups, not_planned_issues(issues), scoped_records, stale)
+
+    tiles = {
+        "points_shipped_this_week": points_shipped_this_week(rows, as_of),
+        "cost_per_point": cost_per_point_stats(rows),
+        "durable_merge_rate": durable_merge_rate(pr_rollups),
+        "rework_share": {"share": None, "coverage": coverage(0, 0), "note": _REWORK_SHARE_NOTE},
+        "dead_end_usd": {"usd": dead_end["usd"], "note": dead_end["excluded_note"]},
+    }
+
+    return {
+        "outcomes_as_of": outcomes_as_of,
+        "tiles": tiles,
+        "per_repo": per_repo_table(rows, as_of=as_of),
+        "autonomy_trend": autonomy_trend(scoped_records, scoped_attrs, rows),
+        "dead_end_list": dead_end["top"],
+        "model_fit": model_fit_candidates(scoped_records, scoped_attrs, issues),
+        "unattributed": unattributed_summary(scoped_records, scoped_attrs),
+    }
