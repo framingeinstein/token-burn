@@ -20,6 +20,8 @@ from cursor_usage import (
     capture_usage,
     token_from_env_or_file,
 )
+from usage_records import resolve_actor as resolve_usage_actor
+from usage_records import run_usage
 
 
 def _prev_day(today):
@@ -72,6 +74,11 @@ def main():
     ap.add_argument("--factory-ledger",
                     default=str(Path(__file__).parent / "factory-snapshots.jsonl"))
     ap.add_argument("--skip-factory", action="store_true")
+    ap.add_argument("--usage-dir", default=str(Path(__file__).parent / "usage"),
+                    help="where finalized usage/<day>.jsonl records are written")
+    ap.add_argument("--actor", default=None,
+                    help="GitHub login for human:<login> usage records; default: gh api user")
+    ap.add_argument("--skip-usage", action="store_true")
     args = ap.parse_args()
 
     prices = load_prices()
@@ -120,6 +127,20 @@ def main():
                 "cursor usage: not configured "
                 f"(token file: {args.cursor_token_file})"
             )
+    if not args.skip_usage:
+        try:
+            actor = resolve_usage_actor({"actor": args.actor} if args.actor else None)
+            if actor:
+                factory_root = (args.factory_root if not args.skip_factory
+                                and os.path.isdir(args.factory_root) else None)
+                added_usage = run_usage(roots, args.tz, args.usage_dir, actor, prices, today,
+                                        factory_root=factory_root,
+                                        refinalize=args.refinalize, since=since)
+                print(f"usage records: +{len(added_usage)} day(s) -> {args.usage_dir}")
+            else:
+                print("usage records: skipped (no actor login; pass --actor or configure gh)")
+        except Exception as exc:
+            print(f"  WARNING: usage-record pass failed: {exc}")
 
 
 if __name__ == "__main__":
