@@ -20,6 +20,10 @@ from cursor_usage import (
     capture_usage,
     token_from_env_or_file,
 )
+from usage_records import resolve_actor as resolve_usage_actor
+from usage_records import run_usage
+from team_upload import DEFAULT_STATE_PATH as DEFAULT_TEAM_UPLOAD_STATE
+from team_upload import load_team_config, upload_pending_days
 
 
 def _prev_day(today):
@@ -72,6 +76,14 @@ def main():
     ap.add_argument("--factory-ledger",
                     default=str(Path(__file__).parent / "factory-snapshots.jsonl"))
     ap.add_argument("--skip-factory", action="store_true")
+    ap.add_argument("--usage-dir", default=str(Path(__file__).parent / "usage"),
+                    help="where finalized usage/<day>.jsonl records are written")
+    ap.add_argument("--actor", default=None,
+                    help="GitHub login for human:<login> usage records; default: gh api user")
+    ap.add_argument("--skip-usage", action="store_true")
+    ap.add_argument("--team-upload-state", default=str(DEFAULT_TEAM_UPLOAD_STATE),
+                    help="idempotence state for team-door uploads (T6)")
+    ap.add_argument("--skip-team-upload", action="store_true")
     args = ap.parse_args()
 
     prices = load_prices()
@@ -120,6 +132,49 @@ def main():
                 "cursor usage: not configured "
                 f"(token file: {args.cursor_token_file})"
             )
+    # this machine's human actor: resolved once, used by the usage-record pass
+    # and (I7) to send only this machine's own records to the team door.
+    actor = None
+    if not (args.skip_usage and args.skip_team_upload):
+        try:
+            actor = resolve_usage_actor({"actor": args.actor} if args.actor else None)
+        except Exception as exc:
+            print(f"  WARNING: actor resolution failed: {exc}")
+    if not args.skip_usage:
+        try:
+            if actor:
+                factory_root = (args.factory_root if not args.skip_factory
+                                and os.path.isdir(args.factory_root) else None)
+                added_usage, failed_usage = run_usage(
+                    roots, args.tz, args.usage_dir, actor, prices, today,
+                    factory_root=factory_root, refinalize=args.refinalize, since=since)
+                print(f"usage records: +{len(added_usage)} day(s) -> {args.usage_dir}")
+                for day, reason in sorted(failed_usage.items()):
+                    print(f"  WARNING: usage records for {day} refused: {reason}")
+            else:
+                print("usage records: skipped (no actor login; pass --actor or configure gh)")
+        except Exception as exc:
+            print(f"  WARNING: usage-record pass failed: {exc}")
+
+    # T6: hooks in AFTER local finalization above -- never blocks or fails it
+    # (wrapped the same way as the usage-record pass). PROVISIONAL against
+    # synkhos/factory#171 (see team_upload.py); no team configured is a no-op.
+    if not args.skip_team_upload:
+        try:
+            team_config = load_team_config()
+            if team_config:
+                result = upload_pending_days(args.usage_dir, team_config, actor=actor,
+                                             state_path=args.team_upload_state)
+                if result.get("skipped_reason"):
+                    print(f"team upload: skipped ({result['skipped_reason']})")
+                print(f"team upload: +{len(result['sent'])} day(s) sent"
+                      + (f"; refused={sorted(result['refused'])}" if result["refused"] else "")
+                      + (f"; unreachable={sorted(result['unreachable'])}" if result["unreachable"] else "")
+                      + (f"; invalid={sorted(result['invalid'])}" if result["invalid"] else ""))
+            else:
+                print("team upload: no team configured")
+        except Exception as exc:
+            print(f"  WARNING: team upload pass failed: {exc}")
 
 
 if __name__ == "__main__":

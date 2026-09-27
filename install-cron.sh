@@ -4,7 +4,32 @@ set -euo pipefail
 cd "$(dirname "$0")"
 DIR="$(pwd)"
 PY="$(command -v python3)"
-LINE="0 9 * * * cd '$DIR' && ./sync-factory.sh >> '$DIR/snapshot.log' 2>&1; '$PY' snapshot.py >> '$DIR/snapshot.log' 2>&1"
+# Chain: mirror factory transcripts, fetch the GitHub outcome cache (issues/PRs), then
+# snapshot. Each step is `;`-separated (not `&&`), so a failed step never blocks the
+# rest of the chain -- same failure-tolerance convention as sync-factory.sh's own
+# internal `|| echo WARNING` fallback. `outcomes.py` only touches the local cache
+# (spec Sec5.2); a stale/missing cache just means the dashboard's Outcomes section
+# shows "outcomes as of" an older timestamp, never a broken snapshot.
+#
+# cron runs with PATH=/usr/bin:/bin, where Homebrew's `gh` is invisible -- and every
+# new step needs it (outcomes.py's token, team upload's credential). So the line
+# exports a PATH that includes the Homebrew/usr-local bins before anything runs.
+# The actor login is resolved ONCE here, at install time (TOKEN_BURN_ACTOR wins, else
+# `gh api user`), and passed as `--actor`, so the usage-record pass never depends on a
+# 09:00 network call. A login that can't be resolved (or isn't login-shaped) installs
+# without --actor and warns; snapshot.py then falls back to `gh api user` at run time.
+ACTOR="${TOKEN_BURN_ACTOR:-}"
+if [ -z "$ACTOR" ] && command -v gh >/dev/null 2>&1; then
+  ACTOR="$(gh api user --jq .login 2>/dev/null || true)"
+fi
+ACTOR_ARG=""
+if printf '%s' "$ACTOR" | grep -Eq '^[A-Za-z0-9-]{1,39}$'; then
+  ACTOR_ARG=" --actor $ACTOR"
+else
+  echo "WARNING: could not resolve a GitHub login (set TOKEN_BURN_ACTOR or run 'gh auth login');" \
+       "installing without --actor -- snapshot.py will try 'gh api user' at run time." >&2
+fi
+LINE="0 9 * * * export PATH=\"/opt/homebrew/bin:/usr/local/bin:\$PATH\"; cd '$DIR' && ./sync-factory.sh >> '$DIR/snapshot.log' 2>&1; '$PY' outcomes.py >> '$DIR/snapshot.log' 2>&1; '$PY' snapshot.py$ACTOR_ARG >> '$DIR/snapshot.log' 2>&1"
 # Read the current crontab (empty if none), strip any prior token-burn entry for THIS
 # repo, then append ours. `|| true` keeps `set -e` from aborting when crontab is empty or
 # grep matches nothing — otherwise an empty pipe to `crontab -` would wipe the crontab.

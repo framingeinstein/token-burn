@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/framingeinstein/token-burn/schemas/usage-record.schema.json",
+  "title": "token-burn usage record",
+  "description": "One record per (day, actor, on_behalf_of, repo, branch, issue, session, model_class, kind). No free text: every string is either an enum or pattern-constrained. See docs/superpowers/specs/2026-09-27-efficiency-metrics-design.md §4.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v", "day", "actor", "on_behalf_of", "requester_source", "repo", "branch",
+    "issue", "session", "model", "model_class", "kind", "calls",
+    "in", "out", "cc", "cr", "cost_usd", "ctx_buckets"
+  ],
+  "properties": {
+    "v": {"const": 1},
+    "day": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "actor": {
+      "type": "string",
+      "pattern": "^(human:[A-Za-z0-9-]{1,39}|factory:[A-Za-z0-9._-]{1,64})$"
+    },
+    "on_behalf_of": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9-]{1,39}$"},
+    "requester_source": {"type": ["string", "null"], "enum": [null, "requested_by", "author"]},
+    "repo": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "branch": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9._/-]{1,200}$"},
+    "issue": {"type": ["integer", "null"], "minimum": 1},
+    "session": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+    "model": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$"},
+    "model_class": {
+      "type": "string",
+      "enum": ["opus", "sonnet", "haiku", "fable", "mythos", "other"]
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["interactive", "impl", "ci-fix", "conflict", "unknown"]
+    },
+    "calls": {"type": "integer", "minimum": 0},
+    "in": {"type": "integer", "minimum": 0},
+    "out": {"type": "integer", "minimum": 0},
+    "cc": {"type": "integer", "minimum": 0},
+    "cr": {"type": "integer", "minimum": 0},
+    "cost_usd": {"type": "number", "minimum": 0},
+    "ctx_buckets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "1": {"$ref": "#/definitions/bucket"},
+        "2-5": {"$ref": "#/definitions/bucket"},
+        "6-20": {"$ref": "#/definitions/bucket"},
+        "21-50": {"$ref": "#/definitions/bucket"},
+        "51+": {"$ref": "#/definitions/bucket"}
+      }
+    }
+  },
+  "definitions": {
+    "bucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["calls", "ctx"],
+      "properties": {
+        "calls": {"type": "integer", "minimum": 0},
+        "ctx": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

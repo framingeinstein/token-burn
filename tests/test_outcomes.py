@@ -1,0 +1,662 @@
+# tests/test_outcomes.py
+"""Outcome cache: fetch orchestration, JSONL latest-wins cache, watermarks/ETags,
+quota floor stop, GraphQL-only-for-the-two-named-cases (spec Sec4.2 / Sec5.2)."""
+import json
+
+import pytest
+
+from github_client import GitHubError, GitHubUnreachable, Quota, QuotaFloorHit
+from outcomes import (
+    approved_by_from_timeline,
+    build_issue_record,
+    build_pr_record,
+    cache_paths,
+    closes_from_body,
+    closes_from_branch,
+    closes_from_timeline,
+    fetch_outcomes,
+    pts_and_source,
+    read_jsonl_latest,
+    read_state,
+    append_jsonl,
+    requested_by_and_source,
+    resolve_pr_closes,
+    reopened_at_from_timeline,
+    review_rounds_from_timeline,
+    revert_target,
+    write_state,
+)
+
+
+def rl(remaining, extra=None):
+    h = {"x-ratelimit-remaining": str(remaining)}
+    if extra:
+        h.update(extra)
+    return h
+
+
+class ScriptedTransport:
+    """Maps (method, url-prefix) -> a canned response, popped in order per key.
+    Records every call so tests can assert what was (and wasn't) invoked."""
+    def __init__(self, script):
+        # script: {(method, url_substring): [ (status, headers, body), ... ]}
+        self.script = {k: list(v) for k, v in script.items()}
+        self.calls = []
+
+    def __call__(self, method, url, headers, body=None):
+        self.calls.append((method, url))
+        for (m, sub), queue in self.script.items():
+            if m == method and sub in url and queue:
+                return queue.pop(0)
+        raise AssertionError(f"unstubbed call: {method} {url}")
+
+
+# --- record field extraction (pure) -----------------------------------------
+
+def test_pts_and_source_parses_numeric_label():
+    # fix round 1 (controller ruling): pts_source is null for now -- the
+    # rater runs from the SAME user's GitHub token as a manual label change,
+    # so an actor-login heuristic can't tell "rater" from "human" apart.
+    labels = ["pts:5", "route:foo"]
+    events = [{"event": "labeled", "label": {"name": "pts:5"}, "actor": {"login": "github-actions[bot]"}}]
+    assert pts_and_source(labels, events) == (5, None)
+
+
+def test_pts_and_source_unrated_label():
+    assert pts_and_source(["pts:unrated"], []) == (None, None)
+
+
+def test_pts_and_source_no_label():
+    assert pts_and_source(["route:foo"], []) == (None, None)
+
+
+def test_pts_and_source_source_is_null_regardless_of_timeline_actor():
+    # No actor-based heuristic: a "human"-looking actor doesn't produce
+    # pts_source: "human" either -- it's always null until synkhos/factory#166
+    # defines the R-6 rating-comment markers this should be read from.
+    labels = ["pts:8"]
+    events = [{"event": "labeled", "label": {"name": "pts:8"}, "actor": {"login": "jason"}}]
+    assert pts_and_source(labels, events) == (8, None)
+
+
+def test_requested_by_from_header_line():
+    body = "**Route:** foo\n**Requested by:** ricky\n\nDone when..."
+    assert requested_by_and_source(body, "some-author") == ("ricky", "requested_by")
+
+
+def test_requested_by_falls_back_to_author():
+    assert requested_by_and_source("no header here", "some-author") == ("some-author", "author")
+    assert requested_by_and_source(None, "some-author") == ("some-author", "author")
+
+
+def test_reopened_at_from_timeline():
+    events = [{"event": "closed", "created_at": "t0"},
+              {"event": "reopened", "created_at": "t1"},
+              {"event": "reopened", "created_at": "t2"}]
+    assert reopened_at_from_timeline(events) == ["t1", "t2"]
+
+
+def test_approved_by_from_timeline_takes_latest():
+    events = [
+        {"event": "labeled", "label": {"name": "approved"}, "actor": {"login": "a"}},
+        {"event": "labeled", "label": {"name": "approved"}, "actor": {"login": "b"}},
+    ]
+    assert approved_by_from_timeline(events) == "b"
+
+
+def test_approved_by_none_when_absent():
+    assert approved_by_from_timeline([{"event": "labeled", "label": {"name": "pts:3"}}]) is None
+
+
+def test_closes_from_timeline_uses_connected_events_only_I9():
+    # `cross-referenced` on a PR's timeline means "some issue/PR MENTIONED this
+    # PR" -- the wrong side for "which issues does this PR close" (final review
+    # I9: 11/15 cached PRs mismatched on live data). Only `connected` counts.
+    events = [
+        {"event": "connected", "source": {"issue": {"number": 12}}},
+        {"event": "cross-referenced", "source": {"issue": {"number": 8}}},
+        {"event": "cross-referenced", "source": {"issue": {"number": 99, "pull_request": {}}}},
+    ]
+    assert closes_from_timeline(events) == [12]
+
+
+def test_closes_from_branch_pattern():
+    assert closes_from_branch("feat/123-do-the-thing") == [123]
+    assert closes_from_branch("main") == []
+    assert closes_from_branch(None) == []
+
+
+def test_closes_from_branch_accepts_githubs_create_branch_from_issue_forms_I9():
+    assert closes_from_branch("171-fix-the-thing") == [171]       # GitHub's default
+    assert closes_from_branch("hotfix/171-x") == [171]
+    assert closes_from_branch("fix.it_now/9-y") == [9]
+    assert closes_from_branch("revert-20-x") == []
+    assert closes_from_branch("a/b/171-x") == []                   # one prefix segment only
+    assert closes_from_branch("feat/x-171") == []
+
+
+def test_closes_from_body_reads_closing_keywords_for_same_repo_refs_only_I9():
+    body = ("Closes #12, fixes o/r#13 and Resolved: #14.\n"
+            "Also fixes other/repo#15; mentions #16; see abc#17\n"
+            "FIX #18 / close #19 / resolves #20 / fixed #21 / closed #22 / resolve #23")
+    assert closes_from_body(body, "o/r") == [12, 13, 14, 18, 19, 20, 21, 22, 23]
+    assert closes_from_body(None, "o/r") == []
+    assert closes_from_body("prefix#12 closes#13 unfixes #14", "o/r") == []
+
+
+def test_resolve_pr_closes_uses_the_body_before_the_branch_and_graphql_I9():
+    called = {"graphql": False}
+    def fake_graphql(*a, **kw):
+        called["graphql"] = True
+        return [999]
+    result = resolve_pr_closes("o/r", 1, "feat/7-x", [], "tok", Quota(), object(),
+                               graphql=fake_graphql, body="Fixes #30")
+    assert result == [30]
+    assert called["graphql"] is False
+    # no keyword in the body -> the branch pattern (GitHub's create-branch form)
+    result = resolve_pr_closes("o/r", 1, "7-x", [], "tok", Quota(), object(),
+                               graphql=fake_graphql, body="just a mention of #30")
+    assert result == [7]
+    assert called["graphql"] is False
+
+
+def test_resolve_pr_closes_ignores_a_cross_reference_mention_I9():
+    events = [{"event": "cross-referenced", "source": {"issue": {"number": 7763}}}]
+    result = resolve_pr_closes("o/r", 191, "feat/5-x", events, "tok", Quota(), object(),
+                               graphql=lambda *a, **k: [999], body="")
+    assert result == [5]
+
+
+def test_review_rounds_counts_reviewed_events():
+    events = [{"event": "reviewed"}, {"event": "commented"}, {"event": "reviewed"}]
+    assert review_rounds_from_timeline(events) == 2
+
+
+def test_resolve_pr_closes_prefers_timeline():
+    events = [{"event": "connected", "source": {"issue": {"number": 5}}}]
+    called = {"graphql": False}
+    def fake_graphql(*a, **kw):
+        called["graphql"] = True
+        return [999]
+    result = resolve_pr_closes("o/r", 1, "feat/7-x", events, "tok", Quota(), object(), graphql=fake_graphql)
+    assert result == [5]
+    assert called["graphql"] is False
+
+
+def test_resolve_pr_closes_falls_back_to_branch_pattern():
+    called = {"graphql": False}
+    def fake_graphql(*a, **kw):
+        called["graphql"] = True
+        return [999]
+    result = resolve_pr_closes("o/r", 1, "feat/7-x", [], "tok", Quota(), object(), graphql=fake_graphql)
+    assert result == [7]
+    assert called["graphql"] is False
+
+
+def test_resolve_pr_closes_calls_graphql_only_when_rest_resolves_nothing():
+    called = {"graphql": False}
+    def fake_graphql(*a, **kw):
+        called["graphql"] = True
+        return [42]
+    result = resolve_pr_closes("o/r", 1, "chore/cleanup", [], "tok", Quota(), object(), graphql=fake_graphql)
+    assert result == [42]
+    assert called["graphql"] is True
+
+
+def test_build_issue_record_shape():
+    issue = {"number": 10, "user": {"login": "jason"}, "state": "closed",
+              "state_reason": "completed", "closed_at": "2026-09-01T00:00:00Z",
+              "labels": [{"name": "pts:3"}], "body": "**Requested by:** ricky\n"}
+    events = [{"event": "reopened", "created_at": "t1"},
+              {"event": "labeled", "label": {"name": "approved"}, "actor": {"login": "jason"}}]
+    rec = build_issue_record("o/r", issue, events)
+    assert rec == {
+        "repo": "o/r", "number": 10, "author": "jason", "requested_by": "ricky",
+        "requester_source": "requested_by", "state": "closed", "state_reason": "completed",
+        "closed_at": "2026-09-01T00:00:00Z", "reopened_at": ["t1"], "pts": 3,
+        "pts_source": None, "labels": ["pts:3"], "approved_by": "jason",
+    }
+    assert "body" not in rec and "title" not in rec
+
+
+def test_build_pr_record_shape():
+    pr = {"number": 20, "user": {"login": "jason"}, "head": {"ref": "feat/10-x"},
+          "state": "closed", "merged_at": "2026-09-02T00:00:00Z"}
+    events = [{"event": "reviewed"}, {"event": "reviewed"}]
+    rec = build_pr_record("o/r", pr, events, closes=[10])
+    assert rec == {
+        "repo": "o/r", "number": 20, "author": "jason", "head_ref": "feat/10-x",
+        "state": "merged", "merged_at": "2026-09-02T00:00:00Z", "closes": [10],
+        "reverted_by": None, "reverts": None, "review_rounds": 2,
+    }
+
+
+# --- revert detection (T4 / controller ruling R7): title is the marker,
+# body-or-timeline supplies the original PR number; only the number is ever
+# stored -- never title/body text --------------------------------------------
+
+def test_revert_target_from_body_reference():
+    title = 'Revert "Add dark mode"'
+    body = "This reverts pull request #35 from o/feat-branch."
+    assert revert_target(title, body, []) == 35
+
+
+def test_revert_target_from_timeline_when_body_has_no_reference():
+    title = 'Revert "Add dark mode"'
+    events = [{"event": "cross-referenced",
+               "source": {"issue": {"number": 35, "pull_request": {}}}}]
+    assert revert_target(title, "This reverts a commit.", events) == 35
+
+
+def test_revert_target_none_when_title_is_not_a_revert():
+    assert revert_target("Add dark mode", "This reverts pull request #35.", []) is None
+
+
+def test_revert_target_none_when_revert_title_has_no_resolvable_reference():
+    # title alone is not enough (controller ruling R7): body/timeline must
+    # actually name the original PR, or this isn't a *confirmed* revert.
+    title = 'Revert "Add dark mode"'
+    assert revert_target(title, "This reverts a commit.", []) is None
+
+
+def test_revert_target_ignores_issue_references_in_timeline():
+    # a cross-referenced issue (not a PR) never counts as the reverted target
+    title = 'Revert "Add dark mode"'
+    events = [{"event": "cross-referenced", "source": {"issue": {"number": 35}}}]
+    assert revert_target(title, "This reverts a commit.", events) is None
+
+
+def test_build_pr_record_sets_reverts_from_title_and_body():
+    pr = {"number": 21, "user": {"login": "jason"}, "head": {"ref": "revert-10-x"},
+          "state": "closed", "merged_at": "2026-09-03T00:00:00Z",
+          "title": 'Revert "Add dark mode"',
+          "body": "This reverts pull request #10 from o/r."}
+    rec = build_pr_record("o/r", pr, [], closes=[])
+    assert rec["reverts"] == 10
+    # never leaks title/body text into the stored record
+    assert "title" not in rec and "body" not in rec
+
+
+# --- cache: JSONL latest-line-wins + state -----------------------------
+
+def test_read_jsonl_latest_wins_by_key(tmp_path):
+    p = tmp_path / "issues.jsonl"
+    append_jsonl(p, {"repo": "o/r", "number": 1, "state": "open"})
+    append_jsonl(p, {"repo": "o/r", "number": 1, "state": "closed"})
+    append_jsonl(p, {"repo": "o/r", "number": 2, "state": "open"})
+    out = read_jsonl_latest(p, lambda r: (r["repo"], r["number"]))
+    assert out[("o/r", 1)]["state"] == "closed"
+    assert out[("o/r", 2)]["state"] == "open"
+
+
+def test_read_jsonl_latest_missing_file(tmp_path):
+    assert read_jsonl_latest(tmp_path / "nope.jsonl", lambda r: r) == {}
+
+
+def test_read_jsonl_latest_skips_corrupt_lines(tmp_path):
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"repo":"o/r","number":1}\nnot json\n')
+    out = read_jsonl_latest(p, lambda r: (r["repo"], r["number"]))
+    assert list(out) == [("o/r", 1)]
+
+
+def test_state_roundtrip(tmp_path):
+    p = tmp_path / "state.json"
+    assert read_state(p) == {"repos": {}, "outcomes_as_of": None}
+    state = read_state(p)
+    state["repos"]["o/r"] = {"issues": {"since": "t1"}}
+    state["outcomes_as_of"] = "t2"
+    write_state(p, state)
+    assert read_state(p) == state
+
+
+def test_cache_paths(tmp_path):
+    paths = cache_paths(tmp_path)
+    assert paths["state"].name == "state.json"
+    assert paths["issues"].name == "issues.jsonl"
+    assert paths["prs"].name == "prs.jsonl"
+
+
+# --- fetch orchestration -----------------------------------------------
+
+def _base_script(remaining=5000):
+    return {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(remaining), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(remaining), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(remaining), [])],
+    }
+
+
+def test_fetch_outcomes_304_costs_no_extra_quota_and_writes_nothing(tmp_path):
+    transport = ScriptedTransport(_base_script())
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
+    assert report["issues"] == 0
+    assert report["stopped"] is None
+    paths = cache_paths(tmp_path)
+    assert not paths["issues"].exists() or paths["issues"].read_text() == ""
+    # etag/watermark preserved even though nothing changed
+    state = read_state(paths["state"])
+    assert "synkhos/a" in state["repos"]
+
+
+def test_fetch_outcomes_processes_new_issues_and_prs(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(200, rl(5000, {"etag": '"e1"'}), [
+            {"number": 1, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-01T00:00:00Z"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(5000), [])],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            {"number": 2, "user": {"login": "jason"}, "state": "closed",
+             "merged_at": "2026-09-02T00:00:00Z", "head": {"ref": "feat/1-x"},
+             "updated_at": "2026-09-02T00:00:00Z"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(5000), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
+    assert report["issues"] == 1
+    assert report["prs"] == 1
+    assert report["stopped"] is None
+    paths = cache_paths(tmp_path)
+    issues = read_jsonl_latest(paths["issues"], lambda r: (r["repo"], r["number"]))
+    prs = read_jsonl_latest(paths["prs"], lambda r: (r["repo"], r["number"]))
+    assert issues[("synkhos/a", 1)]["author"] == "jason"
+    assert prs[("synkhos/a", 2)]["closes"] == [1]
+    assert report["calls"]["graphql"] == 0  # branch pattern resolved it, no GraphQL needed
+    state = read_state(paths["state"])
+    assert state["outcomes_as_of"] is not None
+
+
+def test_fetch_outcomes_stops_at_quota_floor_keeps_cache_and_watermark(tmp_path):
+    # first repo succeeds fully with a low-but-fine remaining; second repo's
+    # very first call reveals remaining below the floor -> must not be made.
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [
+            {"full_name": "synkhos/a"}, {"full_name": "synkhos/b"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(900), None)],  # drops below floor (1000)
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(900), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport,
+                             quota=Quota(floor_core=1000, floor_graphql=1000))
+    assert report["stopped"] == "quota_floor"
+    # repo b was never called
+    assert not any("synkhos/b" in url for _m, url in transport.calls)
+    paths = cache_paths(tmp_path)
+    state = read_state(paths["state"])
+    assert "synkhos/a" in state["repos"]  # watermark for the completed repo kept
+
+
+def test_fetch_outcomes_resumes_next_run_from_saved_watermark(tmp_path):
+    paths = cache_paths(tmp_path)
+    write_state(paths["state"], {"repos": {"synkhos/a": {
+        "issues": {"since": "2026-09-01T00:00:00Z", "etag": '"old"'},
+        "prs": {"since": "2026-09-01T00:00:00Z"},
+    }}, "outcomes_as_of": "2026-09-01T00:00:00Z"})
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [])],
+    }
+    transport = ScriptedTransport(script)
+    fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
+    # the saved watermark was sent as `since=` on the resumed run
+    assert any("since=2026-09-01T00:00:00Z" in url for _m, url in transport.calls)
+
+
+def test_fetch_outcomes_unreachable_keeps_cache_and_outcomes_as_of_unchanged(tmp_path):
+    paths = cache_paths(tmp_path)
+    write_state(paths["state"], {"repos": {}, "outcomes_as_of": "2026-09-01T00:00:00Z"})
+    append_jsonl(paths["issues"], {"repo": "synkhos/a", "number": 1, "state": "open"})
+
+    def boom(method, url, headers, body=None):
+        raise GitHubUnreachable("no network")
+
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=boom)
+    assert report["stopped"] == "unreachable"
+    state = read_state(paths["state"])
+    assert state["outcomes_as_of"] == "2026-09-01T00:00:00Z"  # unchanged
+    assert paths["issues"].read_text() == '{"repo": "synkhos/a", "number": 1, "state": "open"}\n'
+
+
+def test_fetch_outcomes_never_calls_graphql_in_the_default_path(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            {"number": 2, "user": {"login": "jason"}, "state": "closed",
+             "merged_at": "2026-09-02T00:00:00Z", "head": {"ref": "chore/cleanup"},
+             "updated_at": "2026-09-02T00:00:00Z"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(5000), [])],
+        ("POST", "/graphql"): [(200, rl(50000), {"data": {"repository": {"pullRequest": {
+            "closingIssuesReferences": {"nodes": []}}}}})],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
+    # this PR's branch doesn't match feat/<n>- and timeline has no links,
+    # so REST resolves nothing -> GraphQL IS the right call here (one of the
+    # two named cases), and it should be exactly one call.
+    assert report["calls"]["graphql"] == 1
+
+
+# --- fix round 1: non-2xx REST responses must surface, never look like "no data" --
+
+def test_fetch_outcomes_401_on_owner_listing_stops_run_keeps_cache_unchanged(tmp_path):
+    paths = cache_paths(tmp_path)
+    write_state(paths["state"], {"repos": {}, "outcomes_as_of": "2026-09-01T00:00:00Z"})
+    append_jsonl(paths["issues"], {"repo": "synkhos/a", "number": 1, "state": "open"})
+    before = paths["issues"].read_text()
+
+    script = {("GET", "/orgs/synkhos/repos"): [(401, rl(4999), {"message": "Bad credentials"})]}
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
+
+    assert report["stopped"] == "github_error"
+    assert report["failures"] == [{"owner": "synkhos", "status": 401,
+                                    "endpoint": transport.calls[0][1]}]
+    state = read_state(paths["state"])
+    assert state["outcomes_as_of"] == "2026-09-01T00:00:00Z"  # unchanged
+    assert paths["issues"].read_text() == before  # cache untouched
+
+
+def test_fetch_outcomes_500_on_a_repo_listing_call_stops_run_keeps_watermark(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(500, rl(5000), {"message": "Internal error"})],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
+
+    assert report["stopped"] == "github_error"
+    assert len(report["failures"]) == 1
+    failure = report["failures"][0]
+    assert failure["owner"] == "synkhos"
+    assert failure["repo"] == "synkhos/a"
+    assert failure["status"] == 500
+    assert "/repos/synkhos/a/issues" in failure["endpoint"]
+    assert report["outcomes_as_of"] is None  # never advanced
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["outcomes_as_of"] is None
+
+
+# --- fix round 2 (controller ruling): owners may be orgs or users; per-owner
+# and per-repo isolation for GitHubError ------------------------------------
+
+def test_fetch_outcomes_owner_that_404s_on_orgs_falls_back_to_users(tmp_path):
+    script = {
+        ("GET", "/orgs/framingeinstein/repos"): [(404, rl(4999), {"message": "Not Found"})],
+        ("GET", "/users/framingeinstein/repos"): [(200, rl(4998), [
+            {"full_name": "framingeinstein/site"},
+        ])],
+        ("GET", "/repos/framingeinstein/site/issues"): [(304, rl(4998), None)],
+        ("GET", "/repos/framingeinstein/site/pulls"): [(200, rl(4998), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["framingeinstein"], token="tok", transport=transport)
+
+    assert report["stopped"] is None
+    assert report["failures"] == []
+    assert report["repos_seen"] == ["framingeinstein/site"]
+    assert report["outcomes_as_of"] is not None
+
+
+def test_fetch_outcomes_one_owner_fails_another_succeeds_isolates_and_reports(tmp_path):
+    script = {
+        ("GET", "/orgs/badorg/repos"): [(500, rl(4999), {"message": "boom"})],
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(4998), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(200, rl(4998, {"etag": '"e1"'}), [
+            {"number": 1, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-01T00:00:00Z"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(4998), [])],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(4998), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["badorg", "synkhos"], token="tok", transport=transport)
+
+    # the failing owner is reported, not fatal to the run
+    assert report["stopped"] == "github_error"
+    assert report["failures"] == [{"owner": "badorg", "status": 500,
+                                    "endpoint": transport.calls[0][1]}]
+    # the good owner's repo was fetched, cached, and watermarked
+    assert report["repos_seen"] == ["synkhos/a"]
+    assert report["issues"] == 1
+    paths = cache_paths(tmp_path)
+    issues = read_jsonl_latest(paths["issues"], lambda r: (r["repo"], r["number"]))
+    assert ("synkhos/a", 1) in issues
+    state = read_state(paths["state"])
+    assert state["repos"]["synkhos/a"]["issues"]["etag"] == '"e1"'
+    # but outcomes_as_of does NOT advance -- not every owner succeeded
+    assert report["outcomes_as_of"] is None
+    assert state["outcomes_as_of"] is None
+
+
+# --- I8 (final review): a mid-loop stop must never push unprocessed items below the watermark --
+
+def _pr_item(number, updated_at):
+    return {"number": number, "user": {"login": "jason"}, "state": "closed",
+            "merged_at": updated_at, "head": {"ref": f"feat/{number}-x"},
+            "updated_at": updated_at}
+
+
+def test_pr_watermark_stop_mid_loop_does_not_skip_older_unprocessed_prs(tmp_path):
+    # listed updated-desc: C (newest), B, A (oldest). Processing is ascending,
+    # so A is processed; its timeline response drops the pool below the floor
+    # and B's timeline call is refused -> the watermark may only reach A.
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            _pr_item(3, "2026-09-03T00:00:00Z"), _pr_item(2, "2026-09-02T00:00:00Z"),
+            _pr_item(1, "2026-09-01T00:00:00Z")])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(900), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=transport, quota=Quota(floor_core=1000, floor_graphql=1000))
+    assert report["stopped"] == "quota_floor"
+    paths = cache_paths(tmp_path)
+    prs = read_jsonl_latest(paths["prs"], lambda r: r["number"])
+    assert set(prs) == {1}
+    state = read_state(paths["state"])
+    assert state["repos"]["synkhos/a"]["prs"]["since"] == "2026-09-01T00:00:00Z"
+
+
+def test_pr_watermark_stops_strictly_below_an_unprocessed_tie(tmp_path):
+    # A(t1) processed, B(t2) processed, C(t2) refused: advancing to t2 would
+    # drop C forever (the listing stops at updated_at <= since), so the
+    # watermark stays at t1 and B is simply re-fetched next run.
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            _pr_item(3, "2026-09-02T00:00:00Z"), _pr_item(2, "2026-09-02T00:00:00Z"),
+            _pr_item(1, "2026-09-01T00:00:00Z")])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(5000), [])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(900), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=transport, quota=Quota(floor_core=1000, floor_graphql=1000))
+    assert report["stopped"] == "quota_floor"
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["repos"]["synkhos/a"]["prs"]["since"] == "2026-09-01T00:00:00Z"
+
+
+def test_pr_watermark_advances_to_the_newest_on_completion(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            _pr_item(2, "2026-09-02T00:00:00Z"), _pr_item(1, "2026-09-01T00:00:00Z")])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(5000), [])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(5000), [])],
+    }
+    fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                   transport=ScriptedTransport(script))
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["repos"]["synkhos/a"]["prs"]["since"] == "2026-09-02T00:00:00Z"
+
+
+def test_issue_etag_is_saved_only_when_the_listing_was_fully_processed(tmp_path):
+    paths = cache_paths(tmp_path)
+    write_state(paths["state"], {"repos": {"synkhos/a": {
+        "issues": {"since": "2026-08-01T00:00:00Z", "etag": '"old"'}}},
+        "outcomes_as_of": None})
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(200, rl(5000, {"etag": '"new"'}), [
+            {"number": 1, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-01T00:00:00Z"},
+            {"number": 2, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-02T00:00:00Z"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(900), [])],
+    }
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=ScriptedTransport(script),
+                            quota=Quota(floor_core=1000, floor_graphql=1000))
+    assert report["stopped"] == "quota_floor"
+    issues_state = read_state(paths["state"])["repos"]["synkhos/a"]["issues"]
+    # a 304 on the new ETag next run would skip issue #2 -- so keep the old one
+    assert issues_state["etag"] == '"old"'
+    assert issues_state["since"] == "2026-09-01T00:00:00Z"
+
+
+def test_issue_etag_is_saved_after_a_complete_listing(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(200, rl(5000, {"etag": '"new"'}), [
+            {"number": 1, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-01T00:00:00Z"}])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(5000), [])],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [])],
+    }
+    fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                   transport=ScriptedTransport(script))
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["repos"]["synkhos/a"]["issues"]["etag"] == '"new"'
+
+
+def test_fetch_resolves_closes_from_the_pr_body_and_never_stores_it_I9(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            dict(_pr_item(2, "2026-09-02T00:00:00Z"), head={"ref": "chore/cleanup"},
+                 title="Tidy up", body="Some secret-ish prose.\n\nCloses #7")])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(5000), [
+            {"event": "cross-referenced", "source": {"issue": {"number": 7763}}}])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=transport)
+    assert report["calls"]["graphql"] == 0
+    raw = cache_paths(tmp_path)["prs"].read_text()
+    rec = json.loads(raw.strip())
+    assert rec["closes"] == [7]
+    assert "secret-ish" not in raw and "body" not in rec
