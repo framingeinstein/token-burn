@@ -16,6 +16,7 @@ from outcome_metrics import (
     durable_merge_rate,
     iso_week,
     me_issue_population,
+    me_pr_population,
     median,
     model_fit_candidates,
     p90,
@@ -438,6 +439,33 @@ def test_me_issue_population_no_login_is_union_only():
     assert keys == set()
 
 
+# --- me_pr_population: WHICH PRs feed durable_merge_rate (ruling R10a) -------------------
+
+def test_me_pr_population_includes_prs_i_authored():
+    prs = [pr(number=20, author="jason"), pr(number=21, author="ricky")]
+    keys = me_pr_population(prs, me_keys=set(), me_login="jason")
+    assert keys == {("o/r", 20)}
+
+
+def test_me_pr_population_unions_prs_linked_to_my_issues():
+    # ricky authored it, but it closes an issue that's in MY issue population
+    prs = [pr(number=21, author="ricky", closes=[11])]
+    keys = me_pr_population(prs, me_keys={("o/r", 11)}, me_login="jason")
+    assert keys == {("o/r", 21)}
+
+
+def test_me_pr_population_excludes_a_teammates_unlinked_pr():
+    prs = [pr(number=21, author="ricky", closes=[])]
+    keys = me_pr_population(prs, me_keys=set(), me_login="jason")
+    assert keys == set()
+
+
+def test_me_pr_population_no_login_is_union_only():
+    prs = [pr(number=20, author="jason", closes=[10])]
+    keys = me_pr_population(prs, me_keys=set(), me_login=None)
+    assert keys == set()
+
+
 # --- build_outcomes_payload: full assembly, rescoped dollars, honest coverage ------------
 
 def test_build_outcomes_payload_rescopes_dollars_to_me():
@@ -514,6 +542,30 @@ def test_build_outcomes_payload_includes_an_issue_i_requested_even_with_zero_dol
     assert per_repo["points_shipped"] == 3
     assert per_repo["cost_per_point"]["coverage"] == {"counted": 1, "total": 1, "pct": 100.0}
     assert per_repo["cost_per_point"]["median"] == 0.0  # $0 attributed so far, still counted (not excluded)
+
+
+def test_build_outcomes_payload_durable_merge_rate_scoped_to_me_R10a():
+    # Controller ruling R10a regression: MY reverted PR (#20, reverted by my
+    # own #30) must lower MY durable-merge rate; a TEAMMATE's reverted PR
+    # (#40, reverted by ricky's own #41), never linked to any of my issues,
+    # must not -- it's simply not in my PR population at all.
+    issues = [issue(number=10, pts=2, requested_by="jason",
+                    closed_at="2026-09-14T00:00:00Z")]
+    prs = [
+        pr(number=20, author="jason", closes=[10], head_ref="feat/10-x", state="merged"),
+        pr(number=30, author="jason", closes=[], head_ref="revert-20-x", state="merged",
+           reverts=20),
+        pr(number=40, author="ricky", closes=[], head_ref="feat/99-x", state="merged"),
+        pr(number=41, author="ricky", closes=[], head_ref="revert-40-x", state="merged",
+           reverts=40),
+    ]
+    payload = build_outcomes_payload([], issues, prs, as_of="2026-09-15",
+                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+    rate = payload["tiles"]["durable_merge_rate"]
+    # only MY two PRs (#20, #30) count -- ricky's #40/#41 are excluded entirely,
+    # so ricky's revert never drags down my rate.
+    assert rate["coverage"] == {"counted": 2, "total": 2, "pct": 100.0}
+    assert rate["rate"] == pytest.approx(0.5)  # #20 reverted (not durable), #30 durable -> 1/2
 
 
 def test_build_outcomes_payload_shape_has_all_sections():

@@ -37,6 +37,11 @@ correctly zeroed its dollars. `build_outcomes_payload` restricts
 per-repo table, points shipped, validity, autonomy, model fit, dead-end
 list) to `me_issue_population`'s key set before computing anything.
 
+Ruling R10a (same fix round): `durable_merge_rate` needed the same treatment
+on the PR side -- `me_pr_population` scopes it to PRs "Me" authored, UNION
+PRs linked to a "Me" issue, so a teammate's reverted PR that never touches
+any of "Me"'s issues can't lower a personal durable-merge rate.
+
 Ruling R5: `pts:` labels don't exist yet on live issues (the factory rater,
 synkhos/factory#166, isn't built) -- $/pt coverage on real data will be near
 0%, honestly reported via `coverage()`, never fabricated or hidden as an
@@ -54,7 +59,13 @@ import math
 from collections import defaultdict
 from datetime import date, datetime
 
-from attribution import attribute_records, build_join, not_planned_issues, stale_branches
+from attribution import (
+    attribute_records,
+    build_join,
+    not_planned_issues,
+    pr_issue_number,
+    stale_branches,
+)
 
 _MODEL_FIT_MODEL_CLASSES = ("opus", "fable")
 _MODEL_FIT_PTS_CEILING = 2
@@ -300,11 +311,41 @@ def per_repo_table(rows, as_of=None, window_days=_VALIDITY_WINDOW_DAYS):
 
 # --- durable-merge rate: spec Sec3B ------------------------------------------------------
 
+def me_pr_population(prs, me_keys, me_login):
+    """Controller ruling R10a (fix round 1 addendum): the local user's PR
+    population for `durable_merge_rate` -- PRs `me_login` authored, UNION PRs
+    linked (T4's `pr_issue_number`: `closes[]`, falling back to the
+    `feat/<n>-` branch pattern) to an issue in `me_keys` (the `me_issue_
+    population` result). Without this, a teammate's reverted PR that never
+    touches any of "Me"'s issues would still drag down a personal
+    durable-merge rate just because it exists in the same outcome cache.
+
+    Pure/exported and parameterized like `me_issue_population`: the caller
+    decides scope. `build_outcomes_payload` filters `pr_rollups` down to this
+    key set before computing `durable_merge_rate`; the team/factory variant
+    simply calls `durable_merge_rate` on the FULL unfiltered `pr_rollups`
+    (this function is never invoked, not passed a universal population) --
+    scoping is which `pr_rollups` dict you hand to `durable_merge_rate`, not
+    a flag inside it."""
+    keys = set()
+    for pr in prs:
+        key = (pr["repo"], pr["number"])
+        if me_login and pr.get("author") == me_login:
+            keys.add(key)
+            continue
+        num = pr_issue_number(pr)
+        if num is not None and (pr["repo"], num) in me_keys:
+            keys.add(key)
+    return keys
+
+
 def durable_merge_rate(pr_rollups):
     """merged PRs with no revert and no reopen within 14 days, over merged PRs
     (T4's `is_durable_merge`; `None` durability means the PR never merged and
     is excluded, not counted as a failure). Coverage is the PRs actually known
-    to the outcome cache -- "PRs in configured orgs" per spec Sec3B."""
+    to the outcome cache -- "PRs in configured orgs" per spec Sec3B -- or, when
+    the caller passes an already `me_pr_population`-filtered `pr_rollups`
+    (ruling R10a), the PRs known to be "Me"'s."""
     verdicts = [row["durable"] for row in pr_rollups.values() if row.get("durable") is not None]
     if not verdicts:
         return {"rate": None, "coverage": coverage(0, 0)}
@@ -505,6 +546,12 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login
     me_keys = me_issue_population(issues, scoped_attrs, me_login)
     issue_rollups = {key: row for key, row in issue_rollups.items() if key in me_keys}
     scoped_issues = [i for i in issues if (i["repo"], i["number"]) in me_keys]
+
+    # ruling R10a: the durable-merge-rate tile also scopes to "Me"'s own PRs --
+    # authored by me, or linked to a "Me" issue -- so a teammate's reverted PR
+    # never drags down a personal rate just because it's in the same cache.
+    me_pr_keys = me_pr_population(prs, me_keys, me_login)
+    pr_rollups = {key: row for key, row in pr_rollups.items() if key in me_pr_keys}
 
     rows = shipped_issue_rows(issue_rollups, scoped_issues)
     stale = stale_branches(scoped_records, prs, as_of)
