@@ -633,3 +633,19 @@ def test_issue_from_branch_accepts_githubs_create_branch_from_issue_forms_I9():
     assert issue_from_branch("hotfix/171-x") == 171
     assert issue_from_branch("a/b/171-x") is None
     assert issue_from_branch("revert-20-x") is None
+
+
+def test_records_never_share_a_key_when_branches_sanitize_to_the_same_value():
+    # Final-review residual: grouping by the RAW branch while the key uses the
+    # SANITIZED branch let None / "jason@wip" / "a+b" become three records with
+    # one record_key, and the archive (latest line per key) kept $1 of $3.
+    import usage_records as ur
+    base = {"day": "2026-09-27", "model_class": "opus", "model": "claude-opus-4-8",
+            "call_number": 1, "ctx": 10, "in": 1, "out": 1, "cc": 0, "cr": 0, "cost": 1.0}
+    entries = [dict(base, branch=None), dict(base, branch="jason@wip"), dict(base, branch="a+b")]
+    recs = ur._build_records(entries, actor="human:jason", repo="synkhos/nexus",
+                             session_id="s1", kind="interactive")
+    keys = [ur.record_key(r) for r in recs]
+    assert len(keys) == len(set(keys))
+    assert round(sum(r["cost_usd"] for r in recs), 6) == 3.0
+    assert len(recs) == 1 and recs[0]["branch"] is None and recs[0]["calls"] == 3

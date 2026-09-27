@@ -292,19 +292,25 @@ def _build_records(entries, *, actor, repo, session_id, kind, issue=None,
     branch). `branch` is each entry's own (per-message, C2); `issue` is the
     caller's (factory: from the bucket path) or else derived from the
     group's branch. The raw branch is used for the issue BEFORE sanitizing,
-    and a branch failing the schema pattern is recorded as null."""
+    and a branch failing the schema pattern is recorded as null. Groups are
+    keyed on the sanitized branch + derived issue, so records never collide
+    on record_key."""
     groups = collections.defaultdict(list)
     for e in entries:
         d = e["day"]
         if d is None or (since and d < since) or (until and d > until):
             continue
-        groups[(d, e["model_class"], e.get("branch"))].append(e)
+        raw_branch = e.get("branch")
+        # Group on exactly the values that enter record_key (the sanitized
+        # branch and the derived issue), so two raw branches that sanitize
+        # alike can never yield two records sharing one key.
+        rec_issue = issue if issue is not None else issue_from_branch(raw_branch)
+        groups[(d, e["model_class"], sanitize_branch(raw_branch), rec_issue)].append(e)
 
     records = []
-    for (day, mclass, raw_branch) in sorted(groups, key=lambda k: (k[0], k[1], k[2] or "")):
-        es = groups[(day, mclass, raw_branch)]
-        branch = sanitize_branch(raw_branch)
-        rec_issue = issue if issue is not None else issue_from_branch(raw_branch)
+    for (day, mclass, branch, rec_issue) in sorted(
+            groups, key=lambda k: (k[0], k[1], k[2] or "", k[3] if k[3] is not None else -1)):
+        es = groups[(day, mclass, branch, rec_issue)]
         buckets = collections.defaultdict(lambda: {"calls": 0, "ctx": 0})
         totals = {"in": 0, "out": 0, "cc": 0, "cr": 0}
         cost = 0.0
