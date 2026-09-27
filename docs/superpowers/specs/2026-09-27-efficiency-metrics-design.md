@@ -142,7 +142,7 @@ Config `outcomes.fetcher: true` on exactly one machine per team. It writes the o
 | Original body at filing (backfill only) | GraphQL `userContentEdits`, batched 50 issues per query | GraphQL, one-off |
 
 - **Quota floor:** before each call, read `x-ratelimit-remaining`. Below the reserve (default 1000 core / 1000 GraphQL points) the fetcher stops, keeps its cache and watermarks, and the next run resumes. The floor applies equally to backfill.
-- **Credential:** by default the fetcher uses the machine's `gh` token. It's configurable to a dedicated GitHub App installation or fine-grained token, which gets its own rate-limit pool and cannot touch the factory's quota. This is recommended but not required.
+- **Credential:** by default the fetcher uses the machine's `gh` token. It's configurable to a dedicated GitHub App installation. GitHub's pools are **one per user** (every token acting as that user) and **one per app installation**; the factory runs on its own app, so this fetcher only draws on the user's pool. Growth path: a small dedicated app per function gives each function its own pool.
 - **Expected volume:** about 50–100 core calls a day for about 8 repos; GraphQL is near zero in steady state.
 
 ### 5.3 Joins (pure functions, dashboard build time)

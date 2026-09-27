@@ -3,16 +3,16 @@
 **Date:** 2026-09-27
 **Spec:** [efficiency-metrics design](../superpowers/specs/2026-09-27-efficiency-metrics-design.md) (§ refs below are to it)
 **Repo:** `framingeinstein/token-burn`
-**Status:** Draft. Cards to be filed by the Synkhos session ([handoff](../handoffs/2026-09-27-synkhos-ops-dashboard.md)).
+**Status:** Decisions resolved; build in progress (subagent-driven). Cards to be filed by the Synkhos session ([handoff](../handoffs/2026-09-27-synkhos-ops-dashboard.md)).
 **Companion plans (written by the Synkhos session in company-context):** factory card rating (spec §7, R-1…R-12) and the Synkhos ops dashboard (spec §9).
 
-## Decisions the spec still needs
+## Decisions (resolved by Jason, 2026-09-27)
 
-1. **Who builds token-burn cards.** token-burn is a Framing Einstein repo with no factory runner. Options: an interactive session builds them; a runner is added for it; or the repo moves under Synkhos. T1–T6 are sized for a runner either way.
-2. **Team bucket for the `synkhos` team.** Which GCP project hosts it, and its name (spec §5.1). Blocks T6.
-3. **Outcome-fetcher credential.** The machine's `gh` token (works today; shares the factory's quota) or a dedicated GitHub App installation / fine-grained token (its own quota pool) (spec §5.2). Blocks T3.
-4. **Orgs and repos in scope for outcomes.** Proposed: `synkhos/*`, `FramingEinsteinInc/*`, `framingeinstein/*`; `10federal/*` only in its own team (spec §2, §9). Blocks T3.
-5. **Runner → repo map for factory records.** Confirm one runner per repo (`wb-impl-<repo>` → `synkhos/<repo>`), with `terpsichore` → `synkhos/terpsichore-core` (spec §4.1). Blocks T1.
+1. **Who builds token-burn cards:** this interactive session, subagent-driven (one implementer per card, then spec-compliance and code-quality review).
+2. **Team bucket:** GCP project `synkhos`. Bucket `synkhos-token-burn` (name chosen by this session, same pattern as `synkhos-factory-transcripts`).
+3. **Outcome-fetcher credential:** Jason's `gh` token for now. GitHub rate limits are **one pool per user** (every PAT, `gh`, and OAuth or app-user token acting as that user) and **one pool per GitHub App installation** (5,000/hr REST and 5,000 pts/hr GraphQL, scaling to 12,500). The factory uses its own app, so this fetcher's quota floor protects Jason's own pool, not the factory's. **Growth path:** move the fetcher to its own small GitHub App (its own pool per org) if volume or contention grows. The fetcher's credential stays configurable (spec §5.2).
+4. **Orgs in scope:** `synkhos`, `FramingEinsteinInc`, `framingeinstein`.
+5. **Runner → repo map:** one runner per repo (`wb-impl-<repo>` → `synkhos/<repo>`), `terpsichore` → `synkhos/terpsichore-core`. Confirmed.
 
 ## Cards
 
