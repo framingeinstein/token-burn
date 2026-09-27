@@ -7,7 +7,14 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from outcomes import append_jsonl, cache_paths, write_state
-from serve import Handler, build_outcomes_section, choose_port, build_payload
+from serve import (
+    Handler,
+    build_outcomes_section,
+    build_team_upload_section,
+    choose_port,
+    build_payload,
+)
+from team_upload import write_upload_state
 
 def test_choose_port_returns_start_when_free():
     assert choose_port(8799, 20, is_free=lambda p: True) == 8799
@@ -40,6 +47,33 @@ def test_build_payload_assembles_from_ledger_and_logs(tmp_path):
     # "unavailable, with a reason" (spec Sec8) rather than raising.
     assert payload["outcomes"]["available"] is False
     assert "reason" in payload["outcomes"]
+    # T6: team_upload lives under its own NEW top-level key; with no team
+    # configured (env/local config file untouched here) it's absent/empty
+    # rather than raising -- existing keys above are unaffected.
+    assert payload["team_upload"] == {"configured": False}
+
+
+# --- Team upload: reads the local upload-state file only; never uploads ----
+
+def test_build_team_upload_section_unconfigured_is_absent_empty():
+    assert build_team_upload_section({}) == {"configured": False}
+
+
+def test_build_team_upload_section_reads_state_when_configured(tmp_path):
+    state_path = tmp_path / "team-upload-state.json"
+    write_upload_state(state_path, {"days": {
+        "2026-09-25": {"status": "sent", "content_hash": "x", "last_success_at": "2026-09-26T00:00:00Z"},
+        "2026-09-26": {"status": "refused", "reason": {"error": "e", "message": "m", "code": "C"},
+                      "content_hash": "y", "last_attempt_at": "2026-09-26T01:00:00Z"},
+    }})
+    cfg = {"team_config": {"door_url": "https://door.example/upload", "tenant": "fe"},
+          "team_upload_state": state_path,
+          "console_efficiency_url": "https://console.example/factory/efficiency"}
+    result = build_team_upload_section(cfg)
+    assert result["configured"] is True
+    assert result["last_success_at"] == "2026-09-26T00:00:00Z"
+    assert result["refused"] == {"2026-09-26": {"error": "e", "message": "m", "code": "C"}}
+    assert result["console_url"] == "https://console.example/factory/efficiency"
 
 
 # --- Outcomes: reads the cache only, never GitHub; unavailable degrades honestly -------

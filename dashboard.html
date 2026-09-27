@@ -70,6 +70,7 @@
 <section><h2>Cursor local activity</h2><div class="hint">sessions and latest context-window occupancy — activity signals, not billed tokens.</div><div id="cursorActivity"></div></section>
 <section><h2>Efficiency</h2><div class="hint" id="efficiencyHint"></div><div id="efficiency"></div></section>
 <section><h2>Outcomes</h2><div class="hint" id="outcomesHint"></div><div id="outcomes"></div></section>
+<section><h2>Team upload</h2><div class="hint" id="teamUploadHint"></div><div id="teamUpload"></div></section>
 <footer id="foot"></footer>
 
 <script>
@@ -419,6 +420,40 @@ function drawOutcomes(){
   host.innerHTML=html;
 }
 
+// ---------- team upload (T6: upload-only through the factory door; the team ----------
+// ---------- view itself lives in the console's Factory -> Efficiency view) ----------
+function drawTeamUpload(){
+  const tu=DATA.team_upload, host=document.getElementById('teamUpload'), hint=document.getElementById('teamUploadHint');
+  if(!tu || tu.configured===false){
+    hint.textContent='no team configured — usage records stay on this machine.';
+    host.innerHTML='';
+    return;
+  }
+  hint.textContent = tu.last_success_at
+    ? `team upload last succeeded ${tu.last_success_at}.`
+    : 'team upload configured — no day accepted yet.';
+  let html='';
+  if((tu.pending||[]).length){
+    html+=`<div style="margin-bottom:6px">pending: ${tu.pending.map(esc).join(', ')}</div>`;
+  }
+  const refusedDays=Object.keys(tu.refused||{});
+  if(refusedDays.length){
+    let rows='';
+    for(const day of refusedDays){
+      const r=tu.refused[day]||{};
+      rows+=`<tr><td>${esc(day)}</td><td>${esc(r.message||r.error||'refused')}</td><td>${esc(r.code||'—')}</td></tr>`;
+    }
+    html+=`<table><thead><tr><th>Day</th><th>Reason</th><th>Code</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  if(!(tu.pending||[]).length && !refusedDays.length){
+    html+='<div style="color:var(--muted)">every finalized day has been accepted.</div>';
+  }
+  if(tu.console_url){
+    html+=`<div style="margin-top:10px"><a href="${esc(tu.console_url)}" target="_blank" rel="noopener">Team data → console Factory / Efficiency view</a></div>`;
+  }
+  host.innerHTML=html;
+}
+
 // ---------- header + wiring ----------
 function drawHeader(){
   const days=activeDays();
@@ -433,7 +468,7 @@ function drawHeader(){
   document.getElementById('foot').textContent=
     `Claude: ~/.claude/projects, deduped by message.id, API-equivalent cost. Cursor: local activity plus daily aggregate usage events; Cursor cost uses chargedCents. Raw Cursor events and credentials are never stored.`;
 }
-function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); drawCursorBilling(); drawCursorActivity(); drawEfficiency(); drawOutcomes(); }
+function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); drawCursorBilling(); drawCursorActivity(); drawEfficiency(); drawOutcomes(); drawTeamUpload(); }
 
 document.getElementById('toggle').addEventListener('click', e=>{
   const b=e.target.closest('button'); if(!b) return;

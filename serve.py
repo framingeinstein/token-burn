@@ -24,6 +24,12 @@ from efficiency import build_efficiency_payload, collect_usage_records
 from usage_records import resolve_actor as resolve_usage_actor
 from outcomes import DEFAULT_CACHE_DIR, cache_paths, read_jsonl_latest, read_state
 from outcome_metrics import actor_login, build_outcomes_payload
+from team_upload import (
+    DEFAULT_STATE_PATH as DEFAULT_TEAM_UPLOAD_STATE,
+    console_efficiency_url,
+    load_team_config,
+    team_upload_status,
+)
 
 HERE = Path(__file__).parent
 DEFAULT_CURSOR_DB = Path(
@@ -54,6 +60,23 @@ def build_outcomes_section(cache_dir, records, today, me_login):
     return payload
 
 
+def build_team_upload_section(cfg):
+    """The `team_upload` top-level payload key (T6, controller ruling R11).
+    READ-ONLY here -- never uploads or calls the door (that's snapshot.py's
+    job, run out of band by cron); mirrors build_outcomes_section's
+    read-only-cache convention above. No team configured (nothing in `cfg`
+    or in env/the local config file) degrades to `{"configured": False}`
+    rather than raising -- existing payload keys are unaffected either way."""
+    team_config = cfg.get("team_config")
+    if team_config is None:
+        team_config = load_team_config()
+    return team_upload_status(
+        team_config,
+        state_path=cfg.get("team_upload_state") or DEFAULT_TEAM_UPLOAD_STATE,
+        console_url=cfg.get("console_efficiency_url") or console_efficiency_url(),
+    )
+
+
 def build_payload(cfg):
     today = cfg.get("today") or today_str(cfg["tz"])
     prices = load_prices()
@@ -75,6 +98,7 @@ def build_payload(cfg):
     payload["efficiency"] = build_efficiency_payload(usage_records)
     payload["outcomes"] = build_outcomes_section(
         cfg.get("outcomes_cache_dir"), usage_records, today, actor_login(cfg.get("actor")))
+    payload["team_upload"] = build_team_upload_section(cfg)
     return payload
 
 
@@ -141,6 +165,9 @@ def main():
     ap.add_argument("--outcomes-cache-dir", default=str(DEFAULT_CACHE_DIR),
                     help="where the outcome cache (issues.jsonl/prs.jsonl/state.json, "
                          "written by outcomes.py) is read from -- never fetched here")
+    ap.add_argument("--team-upload-state", default=str(DEFAULT_TEAM_UPLOAD_STATE),
+                    help="where the team-door upload-state file (written by "
+                         "snapshot.py/team_upload.py) is read from -- never uploaded here")
     ap.add_argument("--port", type=int, default=8799)
     args = ap.parse_args()
 
@@ -150,6 +177,10 @@ def main():
     if not actor:
         print("efficiency section: no actor login (pass --actor or configure gh); "
               "live-today usage records skipped, finalized archive still reads")
+
+    # resolved once at startup, not per request -- same convention as `actor` above;
+    # a local env/file read, never the network (T6, controller ruling R11).
+    team_config = load_team_config()
 
     cfg = {
         "root": args.root,
@@ -162,6 +193,8 @@ def main():
         "usage_dir": args.usage_dir,
         "actor": actor,
         "outcomes_cache_dir": args.outcomes_cache_dir,
+        "team_config": team_config,
+        "team_upload_state": args.team_upload_state,
         "today": None,
     }
     port = choose_port(args.port, 20, _port_free)
