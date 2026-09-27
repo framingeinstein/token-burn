@@ -344,7 +344,8 @@ def local_usage_records(file_path, raw_text, tz_name, prices, actor, run=subproc
                           kind="interactive", since=since, until=until)
 
 
-def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, until=None):
+def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, until=None,
+                          memo=None):
     """Usage records for factory runner transcripts laid out
     {runner}/{issue}/{execution}/{session}.jsonl. `kind` is always "unknown"
     (Ruling R2, factory#109 not landed); `repo` from the runner map, `issue`
@@ -366,13 +367,20 @@ def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, unti
         parts = Path(f).relative_to(root).parts
         if len(parts) < 2:
             continue
-        raw = _read(f)
-        if raw is None:
-            continue
+        if memo is not None:
+            got = memo.get(f)
+            if got is None:
+                continue
+            recs = got[0]
+        else:
+            raw = _read(f)
+            if raw is None:
+                continue
+            recs = dedupe_messages(raw)
         runner, issue_part = parts[0], parts[1]
         issue = int(issue_part) if issue_part.isdigit() else None
         repo = resolve_factory_repo(runner, repo_map)
-        entries = _call_entries(dedupe_messages(raw), tz, prices)
+        entries = _call_entries(recs, tz, prices)
         fresh = []
         for e in entries:
             mid = e["id"]

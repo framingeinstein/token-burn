@@ -15,6 +15,7 @@ import collections
 import glob
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -156,8 +157,13 @@ def local_day(ts_iso, tz):
     return dt.astimezone(tz).date().isoformat()
 
 
-def parse_session(raw_text, file_path, tz, prices):
-    recs = dedupe_messages(raw_text)
+def parse_session(raw_text, file_path, tz, prices, recs=None, label=None):
+    """`recs`/`label` may be passed pre-computed (a `SessionMemo` hit) instead
+    of re-parsing `raw_text`; the result is identical either way."""
+    if recs is None:
+        recs = dedupe_messages(raw_text)
+    if label is None:
+        label = session_label(raw_text)
     any_side = any(r["is_sidechain"] for r in recs)
     cwd = next((r["cwd"] for r in recs if r.get("cwd")), None)
     messages = []
@@ -173,7 +179,7 @@ def parse_session(raw_text, file_path, tz, prices):
             "cost": cost_usd(prices, r["model"], day or "", r["in"], r["out"], r["cc"], r["cr"]),
         })
     return {
-        "label": session_label(raw_text),
+        "label": label,
         "project": project_of(cwd),
         "is_subagent": is_subagent(file_path, any_side),
         "source": "local",
@@ -326,25 +332,89 @@ def _read(f):
         return None
 
 
-def day_records(root, tz_name, since=None, until=None, prices=None):
+class SessionMemo:
+    """Per-file parse memo for a long-running process (serve.py, final review
+    I3): `path -> (mtime_ns, size) signature, deduped messages, label`. A file
+    whose signature is unchanged since it was last read is neither re-read nor
+    re-parsed, so the live "today" passes (the token/cost rollup, the
+    factory rollup, and the efficiency usage records) share ONE parse of each
+    file per request, and a warm request re-parses only files that changed.
+
+    Generations bound memory: `begin()` starts one (a request), `end()` drops
+    every entry not touched since that `begin()` -- i.e. files that fell out of
+    the live window. The cached message lists are shared, never mutated by
+    their consumers (they build new dicts from them)."""
+
+    def __init__(self):
+        self._entries = {}
+        self._lock = threading.Lock()
+        self._gen = 0
+        self.hits = 0
+        self.misses = 0
+
+    def begin(self):
+        with self._lock:
+            self._gen += 1
+
+    def end(self):
+        with self._lock:
+            self._entries = {k: e for k, e in self._entries.items() if e[3] >= self._gen}
+
+    def get(self, path):
+        """`(recs, label)` for `path` (`dedupe_messages` / `session_label` of its
+        text), or None when it can't be read."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        sig = (st.st_mtime_ns, st.st_size)
+        with self._lock:
+            entry = self._entries.get(path)
+            if entry is not None and entry[0] == sig:
+                self.hits += 1
+                self._entries[path] = (sig, entry[1], entry[2], self._gen)
+                return entry[1], entry[2]
+        raw = _read(path)
+        if raw is None:
+            return None
+        recs, label = dedupe_messages(raw), session_label(raw)
+        with self._lock:
+            self.misses += 1
+            self._entries[path] = (sig, recs, label, self._gen)
+        return recs, label
+
+
+def _parse_file(f, tz, prices, memo=None):
+    """`parse_session` of file `f` (None if unreadable), through `memo` if given."""
+    if memo is None:
+        raw = _read(f)
+        return None if raw is None else parse_session(raw, f, tz, prices)
+    got = memo.get(f)
+    if got is None:
+        return None
+    return parse_session(None, f, tz, prices, recs=got[0], label=got[1])
+
+
+def day_records(root, tz_name, since=None, until=None, prices=None, memo=None):
     """Glob logs under one root or a list of roots, parse, and return
-    (per-day records in [since,until], meta)."""
+    (per-day records in [since,until], meta). `memo` (a `SessionMemo`) lets
+    repeated calls skip re-reading unchanged files; output is identical."""
     if prices is None:
         prices = load_prices()
     tz = ZoneInfo(tz_name)
 
     def sessions():
         for f in _jsonl_files(root, _mtime_floor(since, tz)):
-            raw = _read(f)
-            if raw is not None:
-                yield parse_session(raw, f, tz, prices)
+            s = _parse_file(f, tz, prices, memo)
+            if s is not None:
+                yield s
     return _records(sessions(), tz_name, since, until, prices)
 
 
 DEFAULT_FACTORY_ROOT = Path("~/.token-burn/factory-transcripts").expanduser()
 
 
-def factory_day_records(root, tz_name, since=None, until=None, prices=None):
+def factory_day_records(root, tz_name, since=None, until=None, prices=None, memo=None):
     """Remote factory runner transcripts, mirrored from the bucket laid out as
     {runner}/{issue}/{execution}/{session}.jsonl. Attribution comes from the path
     (every runner's cwd is the same /tmp/wt-N), and a message.id counts once across
@@ -360,10 +430,9 @@ def factory_day_records(root, tz_name, since=None, until=None, prices=None):
             parts = Path(f).relative_to(root).parts
             if len(parts) < 2:
                 continue
-            raw = _read(f)
-            if raw is None:
+            s = _parse_file(f, tz, prices, memo)
+            if s is None:
                 continue
-            s = parse_session(raw, f, tz, prices)
             fresh = []
             for m in s["messages"]:
                 if m["id"] and m["id"] in seen:

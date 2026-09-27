@@ -151,3 +151,107 @@ def test_build_payload_without_root_discovers_every_store(tmp_path, monkeypatch)
            "cursor_ledger": str(tmp_path / "missing.jsonl")}
     payload = build_payload(cfg)
     assert payload["days"][0]["date"] == "2026-05-21"
+
+
+# --- I3 (final review): one parse of today shared across passes and requests -----
+
+import os
+import time
+
+
+def _write_session(path, day, n_calls, cwd, branch="feat/7-x", start=0):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"type": "summary", "aiTitle": f"T {path.stem}"})]
+    for i in range(n_calls):
+        mid = f"{path.stem}-m{start + i}"
+        base = {"type": "assistant", "timestamp": f"{day}T{(i // 60) % 24:02d}:{i % 60:02d}:00Z",
+                "cwd": cwd, "gitBranch": branch,
+                "message": {"id": mid, "model": "claude-sonnet-4-6",
+                            "usage": {"input_tokens": 3, "output_tokens": 50,
+                                      "cache_creation_input_tokens": 100,
+                                      "cache_read_input_tokens": 2000}}}
+        # two content-block lines per message, as Claude Code writes them
+        lines.append(json.dumps(dict(base, uuid=f"{mid}-a")))
+        lines.append(json.dumps(dict(base, uuid=f"{mid}-b")))
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _memo_cfg(tmp_path, root, today, memo=None):
+    cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": [root],
+           "tz": "UTC", "today": today,
+           "cursor_db": str(tmp_path / "missing.vscdb"),
+           "cursor_ledger": str(tmp_path / "missing.jsonl"),
+           "usage_dir": str(tmp_path / "usage"), "actor": "human:jason",
+           "team_config": {}, "team_upload_state": str(tmp_path / "team.json")}
+    if memo is not None:
+        cfg["session_memo"] = memo
+    return cfg
+
+
+def _strip_generated_at(payload):
+    payload = json.loads(json.dumps(payload))
+    payload["meta"].pop("generated_at", None)
+    return payload
+
+
+def test_build_payload_second_call_with_unchanged_files_reuses_the_memo(tmp_path):
+    from parse import SessionMemo
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    root = tmp_path / "logs"
+    for n in range(3):
+        _write_session(root / f"s{n}.jsonl", today, 5, str(tmp_path))
+    memo = SessionMemo()
+    first = build_payload(_memo_cfg(tmp_path, root, today, memo))
+    misses_after_first = memo.misses
+    assert misses_after_first == 3            # each file read+parsed ONCE across both passes
+    second = build_payload(_memo_cfg(tmp_path, root, today, memo))
+    assert memo.misses == misses_after_first  # nothing re-read
+    assert _strip_generated_at(first) == _strip_generated_at(second)
+
+    # a file that changed is re-read on the next call; the others are not
+    _write_session(root / "s0.jsonl", today, 6, str(tmp_path))
+    os.utime(root / "s0.jsonl", (time.time() + 5, time.time() + 5))
+    third = build_payload(_memo_cfg(tmp_path, root, today, memo))
+    assert memo.misses == misses_after_first + 1
+    assert third["efficiency"]["days"][0]["out"] == first["efficiency"]["days"][0]["out"] + 50
+
+
+def test_build_payload_with_memo_matches_without_memo(tmp_path):
+    from parse import SessionMemo
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    root = tmp_path / "logs"
+    for n in range(3):
+        _write_session(root / f"s{n}.jsonl", today, 7, str(tmp_path))
+    plain = build_payload(_memo_cfg(tmp_path, root, today))
+    memoised = build_payload(_memo_cfg(tmp_path, root, today, SessionMemo()))
+    assert _strip_generated_at(plain) == _strip_generated_at(memoised)
+
+
+def test_build_payload_fixture_scale_budget(tmp_path):
+    """spec §10: /api/data under 5 s -- a regression budget at fixture scale
+    (roughly the real heaviest live window seen: 300 sessions, ~108k transcript
+    lines), cold and warm; the warm call must not re-read anything."""
+    from parse import SessionMemo
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    root = tmp_path / "logs"
+    cwds = []
+    for c in range(6):                        # six working dirs, none a git repo
+        d = tmp_path / "work" / f"w{c}"
+        d.mkdir(parents=True)
+        cwds.append(str(d))
+    for n in range(300):
+        _write_session(root / f"p{n % 6}" / f"s{n}.jsonl", today, 180, cwds[n % 6],
+                       branch=f"feat/{n}-x")
+    memo = SessionMemo()
+    cfg = _memo_cfg(tmp_path, root, today, memo)
+    t0 = time.perf_counter()
+    cold = build_payload(cfg)
+    cold_s = time.perf_counter() - t0
+    misses = memo.misses
+    t0 = time.perf_counter()
+    build_payload(cfg)
+    warm_s = time.perf_counter() - t0
+    assert cold["efficiency"]["days"][0]["out"] == 300 * 180 * 50
+    assert cold_s < 5.0, f"cold build_payload {cold_s:.2f}s over the 5 s budget"
+    assert memo.misses == misses              # warm: no file re-read or re-parsed
+    assert warm_s < 5.0, f"warm build_payload {warm_s:.2f}s over the 5 s budget"

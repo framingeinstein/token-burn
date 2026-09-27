@@ -95,17 +95,20 @@ def _stitch(ledger_path, live_days, today):
 
 
 def assemble_rollup(ledger_path, root, tz_name, today, prices=None,
-                    factory_ledger_path=None, factory_root=None):
+                    factory_ledger_path=None, factory_root=None, memo=None):
     """Merge finalized archive days (date < today, authoritative) with a live
     parse of `today`, for local Claude Code stores and (optionally) the remote
-    factory runners' separate archive. Returns the dashboard payload {meta, days}."""
+    factory runners' separate archive. Returns the dashboard payload {meta, days}.
+    `memo` (a `parse.SessionMemo`) shares the live parse with other passes and
+    requests; it never changes the result."""
     if prices is None:
         prices = load_prices()
-    live_days, live_meta = day_records(root, tz_name, since=today, until=today, prices=prices)
+    live_days, live_meta = day_records(root, tz_name, since=today, until=today, prices=prices,
+                                       memo=memo)
     days_by_date = _stitch(ledger_path, live_days, today)
     if factory_ledger_path or factory_root:
         fac_live, fac_meta = ([], {}) if not factory_root else factory_day_records(
-            factory_root, tz_name, since=today, until=today, prices=prices)
+            factory_root, tz_name, since=today, until=today, prices=prices, memo=memo)
         fac = _stitch(factory_ledger_path or "", fac_live, today)
         for d, rec in fac.items():
             days_by_date[d] = merge_days(days_by_date[d], rec) if d in days_by_date else rec

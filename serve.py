@@ -15,7 +15,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from parse import DEFAULT_FACTORY_ROOT, _default_tz_name, default_roots
+from parse import DEFAULT_FACTORY_ROOT, SessionMemo, _default_tz_name, default_roots
 from prices import load_prices
 from ledger import assemble_rollup, today_str
 from cursor_local import read_cursor_activity
@@ -78,6 +78,19 @@ def build_team_upload_section(cfg):
 
 
 def build_payload(cfg):
+    # I3: one parse of each live file, shared by the rollup's and the efficiency
+    # section's passes -- and, through cfg["session_memo"] (serve.main keeps one
+    # for the process), across requests, so a warm request only re-reads files
+    # that changed. A fresh memo per call when none is configured.
+    memo = cfg.get("session_memo") or SessionMemo()
+    memo.begin()
+    try:
+        return _build_payload(cfg, memo)
+    finally:
+        memo.end()
+
+
+def _build_payload(cfg, memo):
     today = cfg.get("today") or today_str(cfg["tz"])
     prices = load_prices()
     payload = assemble_rollup(
@@ -85,6 +98,7 @@ def build_payload(cfg):
         prices=prices,
         factory_ledger_path=cfg.get("factory_ledger"),
         factory_root=cfg.get("factory_root"),
+        memo=memo,
     )
     payload["cursor"] = {
         "local": read_cursor_activity(cfg["cursor_db"], cfg["tz"]),
@@ -93,7 +107,7 @@ def build_payload(cfg):
     usage_records = collect_usage_records(
         cfg.get("usage_dir"), cfg.get("root") or default_roots(), cfg["tz"], prices,
         cfg.get("actor"), today, factory_root=cfg.get("factory_root"),
-        repo_map=cfg.get("repo_map"),
+        repo_map=cfg.get("repo_map"), memo=memo,
     )
     payload["efficiency"] = build_efficiency_payload(usage_records)
     payload["outcomes"] = build_outcomes_section(
@@ -196,6 +210,7 @@ def main():
         "team_config": team_config,
         "team_upload_state": args.team_upload_state,
         "today": None,
+        "session_memo": SessionMemo(),   # I3: per-file parse memo shared across requests
     }
     port = choose_port(args.port, 20, _port_free)
     if port is None:
