@@ -46,6 +46,12 @@ _KEY_FIELDS = ("day", "actor", "on_behalf_of", "repo", "branch", "issue", "sessi
 
 _ISSUE_BRANCH_RE = re.compile(r"^feat/(\d+)-")
 
+# Same shape as the schema's `branch` pattern (schemas/usage-record.schema.json) —
+# duplicated here (not loaded from the file) so it stays a fast, dependency-free
+# check on the hot build path; the schema is the source of truth and a mismatch
+# would surface immediately as a validation failure in tests.
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+
 _FACTORY_REPO_OVERRIDES = {"terpsichore": "terpsichore-core"}
 
 
@@ -115,6 +121,16 @@ def issue_from_branch(branch):
         return None
     m = _ISSUE_BRANCH_RE.match(branch)
     return int(m.group(1)) if m else None
+
+
+def sanitize_branch(branch):
+    """A branch that fails the record schema's own pattern is recorded as
+    `branch: null` rather than producing an invalid record (controller ruling,
+    T1 round 1) — git branch names may contain characters (spaces, `@`, ...)
+    the schema's identifier pattern doesn't allow."""
+    if branch and _BRANCH_RE.match(branch):
+        return branch
+    return None
 
 
 # --- actor resolution (never called in tests without an injected login) ----
@@ -219,7 +235,8 @@ def local_usage_records(file_path, raw_text, tz_name, prices, actor, run=subproc
     cwd = next((r["cwd"] for r in recs if r.get("cwd")), None)
     repo = resolve_repo(cwd, run=run, cache=repo_cache)
     branch = resolve_branch(cwd, run=run)
-    issue = issue_from_branch(branch)
+    issue = issue_from_branch(branch)          # from the raw branch, before sanitizing
+    branch = sanitize_branch(branch)           # invalid shape -> null, never an invalid record
     session_id = Path(file_path).stem
     return _build_records(entries, actor=actor, repo=repo, branch=branch, issue=issue,
                           session_id=session_id, kind="interactive", since=since, until=until)
@@ -398,8 +415,13 @@ def run_usage(root, tz_name, usage_dir, actor, prices, today, factory_root=None,
     """Build and append usage records for every finalized day (date < today), the
     same idempotent/--refinalize convention as snapshot.run: a day already
     present in usage/<day>.jsonl is left alone unless `refinalize`, in which
-    case a fresh line is appended and the latest line wins on read. Returns
-    the set of days actually (re)written."""
+    case a fresh line is appended and the latest line wins on read.
+
+    Each day is finalized independently: a day whose batch fails schema
+    validation is refused (nothing written for that day) without blocking any
+    other day in the run. Returns `(added, failed)` — `added` is the set of
+    days actually (re)written; `failed` maps a refused day to its failure
+    reason."""
     usage_dir = Path(usage_dir)
     pre_existing = {p.stem for p in usage_dir.glob("*.jsonl")} if usage_dir.is_dir() else set()
 
@@ -415,12 +437,16 @@ def run_usage(root, tz_name, usage_dir, actor, prices, today, factory_root=None,
                                        since=since):
             by_day[r["day"]].append(r)
 
-    added = set()
+    added, failed = set(), {}
     for day, recs in by_day.items():
         if day is None or day >= today:
             continue
         if day in pre_existing and not refinalize:
             continue
-        append_usage_records(usage_dir, day, recs)
+        try:
+            append_usage_records(usage_dir, day, recs)
+        except SchemaError as exc:
+            failed[day] = str(exc)
+            continue
         added.add(day)
-    return added
+    return added, failed

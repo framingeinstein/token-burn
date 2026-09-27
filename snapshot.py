@@ -133,10 +133,12 @@ def main():
             if actor:
                 factory_root = (args.factory_root if not args.skip_factory
                                 and os.path.isdir(args.factory_root) else None)
-                added_usage = run_usage(roots, args.tz, args.usage_dir, actor, prices, today,
-                                        factory_root=factory_root,
-                                        refinalize=args.refinalize, since=since)
+                added_usage, failed_usage = run_usage(
+                    roots, args.tz, args.usage_dir, actor, prices, today,
+                    factory_root=factory_root, refinalize=args.refinalize, since=since)
                 print(f"usage records: +{len(added_usage)} day(s) -> {args.usage_dir}")
+                for day, reason in sorted(failed_usage.items()):
+                    print(f"  WARNING: usage records for {day} refused: {reason}")
             else:
                 print("usage records: skipped (no actor login; pass --actor or configure gh)")
         except Exception as exc:

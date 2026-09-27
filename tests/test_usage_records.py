@@ -355,9 +355,10 @@ def test_run_usage_finalizes_only_completed_days(tmp_path):
     (root / "s1.jsonl").write_text(_session_text(str(d), [("m1", "claude-opus-4-8", 10)],
                                                   day="2026-09-25"))
     usage_dir = tmp_path / "usage"
-    added = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
-                      today="2026-09-26")
+    added, failed = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
+                              today="2026-09-26")
     assert added == {"2026-09-25"}
+    assert failed == {}
     assert usage_path(usage_dir, "2026-09-25").exists()
 
 
@@ -368,9 +369,9 @@ def test_run_usage_never_finalizes_today(tmp_path):
     (root / "s1.jsonl").write_text(_session_text(str(d), [("m1", "claude-opus-4-8", 10)],
                                                   day="2026-09-25"))
     usage_dir = tmp_path / "usage"
-    added = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
-                      today="2026-09-25")
-    assert added == set()
+    added, failed = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
+                              today="2026-09-25")
+    assert added == set() and failed == {}
     assert not usage_path(usage_dir, "2026-09-25").exists()
 
 
@@ -383,9 +384,9 @@ def test_run_usage_is_idempotent(tmp_path):
     usage_dir = tmp_path / "usage"
     run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES, today="2026-09-26")
     lines_before = usage_path(usage_dir, "2026-09-25").read_text().count("\n")
-    added = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
-                      today="2026-09-26")
-    assert added == set()
+    added, failed = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
+                              today="2026-09-26")
+    assert added == set() and failed == {}
     assert usage_path(usage_dir, "2026-09-25").read_text().count("\n") == lines_before
 
 
@@ -397,9 +398,9 @@ def test_run_usage_refinalize_appends_and_latest_wins(tmp_path):
                                                   day="2026-09-25"))
     usage_dir = tmp_path / "usage"
     run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES, today="2026-09-26")
-    added = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
-                      today="2026-09-26", refinalize=True)
-    assert added == {"2026-09-25"}
+    added, failed = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
+                              today="2026-09-26", refinalize=True)
+    assert added == {"2026-09-25"} and failed == {}
     recs = read_usage_records(usage_dir, "2026-09-25")
     assert len(recs) == 1   # same composite key both times -> latest line wins on read
 
@@ -410,8 +411,79 @@ def test_run_usage_includes_factory_root(tmp_path):
     _factory_session(tmp_path / "factory" / "lattice" / "9" / "e" / "s.jsonl",
                      [("m1", "claude-sonnet-4-6", 5)], day="2026-09-25")
     usage_dir = tmp_path / "usage"
-    added = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
-                      today="2026-09-26", factory_root=tmp_path / "factory")
-    assert added == {"2026-09-25"}
+    added, failed = run_usage(root, "UTC", usage_dir, "human:framingeinstein", PRICES,
+                              today="2026-09-26", factory_root=tmp_path / "factory")
+    assert added == {"2026-09-25"} and failed == {}
     recs = read_usage_records(usage_dir, "2026-09-25")
     assert any(r["actor"] == "factory:lattice" for r in recs)
+
+
+def test_run_usage_isolates_a_bad_day_and_reports_it(tmp_path, monkeypatch):
+    """Round 1 fix: a SchemaError for one day's batch must not abort the run —
+    the good day still finalizes, the bad day is refused and reported."""
+    import usage_records as ur
+
+    root = tmp_path / "logs"
+    root.mkdir()
+    (root / "s1.jsonl").write_text("irrelevant — local_usage_records is faked below")
+
+    good = _valid_record(day="2026-09-24", session="good-day")
+    bad = _valid_record(day="2026-09-25", session="bad-day")
+    bad["extra"] = "this field does not exist in the schema"  # additionalProperties: false
+
+    monkeypatch.setattr(ur, "local_usage_records", lambda *a, **kw: [good, bad])
+
+    usage_dir = tmp_path / "usage"
+    added, failed = ur.run_usage(root, "UTC", usage_dir, "human:x", PRICES, today="2026-09-26")
+
+    assert added == {"2026-09-24"}
+    assert usage_path(usage_dir, "2026-09-24").exists()
+    assert read_usage_records(usage_dir, "2026-09-24")[0]["session"] == "good-day"
+
+    assert set(failed) == {"2026-09-25"}
+    assert not usage_path(usage_dir, "2026-09-25").exists()
+    assert "extra" in failed["2026-09-25"]
+
+
+# --- controller ruling: an invalid branch is nulled, not an invalid record ---
+
+class _FakeGitResult:
+    def __init__(self, returncode, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def _fake_git(remote=None, branch=None):
+    def run(cmd, **kw):
+        if "remote" in cmd:
+            return _FakeGitResult(0, remote) if remote else _FakeGitResult(1, "")
+        if "rev-parse" in cmd:
+            return _FakeGitResult(0, branch) if branch else _FakeGitResult(1, "")
+        return _FakeGitResult(1, "")
+    return run
+
+
+def test_branch_with_a_space_is_nulled_but_issue_still_extracted(tmp_path):
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)])
+    run = _fake_git(branch="feat/71-fix a bug")   # matches feat/<n>- but fails the branch pattern
+    recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x", run=run)
+    assert len(recs) == 1
+    r = recs[0]
+    assert r["branch"] is None
+    assert r["issue"] == 71
+    validate_usage_record(r)
+
+
+def test_branch_with_at_sign_is_nulled(tmp_path):
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)])
+    run = _fake_git(branch="feat/71-widgets@2")   # '@' is not in the branch pattern's charset
+    recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x", run=run)
+    assert recs[0]["branch"] is None
+    validate_usage_record(recs[0])
+
+
+def test_branch_matching_pattern_is_kept(tmp_path):
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)])
+    run = _fake_git(branch="feat/71-widgets")
+    recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x", run=run)
+    assert recs[0]["branch"] == "feat/71-widgets"
