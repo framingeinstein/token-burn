@@ -68,6 +68,7 @@
 <section><h2>By model &amp; by agent</h2><div class="hint">model mix, and main-thread vs sub-agent (parallel) work.</div><div id="models"></div></section>
 <section><h2>Cursor billed usage</h2><div class="hint">daily aggregate usage events from Cursor's dashboard API; no raw events or credentials are retained.</div><div id="cursorBilling"></div></section>
 <section><h2>Cursor local activity</h2><div class="hint">sessions and latest context-window occupancy — activity signals, not billed tokens.</div><div id="cursorActivity"></div></section>
+<section><h2>Efficiency</h2><div class="hint" id="efficiencyHint"></div><div id="efficiency"></div></section>
 <footer id="foot"></footer>
 
 <script>
@@ -279,6 +280,57 @@ function drawCursorBilling(){
   </div>`;
 }
 
+// ---------- efficiency (token-level, exact, 100% of spend — no METRIC/SOURCE toggle: ----------
+// ---------- these are ratios and mean-token counts, not $-vs-tokens amounts) -----------------
+function fmtPct(v){ return v==null ? '—' : (v*100).toFixed(1)+'%'; }
+function ctxBarRow(label,val,maxVal,W,color){
+  const w=maxVal?Math.max(val?2:0,(val/maxVal)*(W-150)):0;
+  return `<div style="display:flex;align-items:center;gap:8px;margin:5px 0">
+    <div style="width:120px;color:var(--ink)">${esc(label)}</div>
+    <svg width="${W-150}" height="16"><rect width="${w}" height="16" rx="3" fill="${color}"/></svg>
+    <div style="color:var(--muted);font-variant-numeric:tabular-nums">${val==null?'—':fmtTok(val)+' ctx tok/call'}</div></div>`;
+}
+function drawEfficiencyChart(days){
+  const pts=days.filter(d=>d.cache_hit_rate!=null).map(d=>({date:new Date(d.date+'T00:00:00'), v:d.cache_hit_rate}));
+  if(pts.length<2) return '<div style="color:var(--muted)">not enough days yet.</div>';
+  const W=920,H=160,L=44,R=16,T=10,B=24;
+  const t0=pts[0].date.getTime(), t1=pts[pts.length-1].date.getTime();
+  const X=t=> L + (t1===t0?0:(t-t0)/(t1-t0))*(W-L-R);
+  const Y=v=> T + (1-v)*(H-T-B);
+  let grid='',ax='';
+  for(const p of [0,0.25,0.5,0.75,1]){ const y=Y(p);
+    grid+=`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="var(--line)"/>`;
+    ax+=`<text x="${L-8}" y="${y+3}" text-anchor="end" font-size="10" fill="var(--muted)">${Math.round(p*100)}%</text>`; }
+  const n=pts.length, ticks=new Set([0,n-1]);
+  for(let i=1;i<6;i++) ticks.add(Math.round(i*(n-1)/6));
+  let xl='';
+  for(const i of [...ticks].sort((a,b)=>a-b)){ const x=X(pts[i].date.getTime());
+    xl+=`<text x="${x}" y="${H-6}" text-anchor="middle" font-size="10" fill="var(--muted)">${pts[i].date.toISOString().slice(5,10)}</text>`; }
+  const line=pts.map((p,i)=>`${i?'L':'M'}${X(p.date.getTime()).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(' ');
+  const dots=pts.map(p=>`<circle cx="${X(p.date.getTime()).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.2" fill="var(--navy)"><title>${p.date.toISOString().slice(0,10)}: ${fmtPct(p.v)}</title></circle>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}">${grid}<path d="${line}" fill="none" stroke="var(--navy)" stroke-width="1.6"/>${dots}${ax}${xl}</svg>`;
+}
+function drawEfficiency(){
+  const eff=DATA.efficiency, host=document.getElementById('efficiency'), hint=document.getElementById('efficiencyHint');
+  if(!eff || !eff.days || !eff.days.length){
+    hint.textContent='no Claude Code usage records yet — run python3 snapshot.py to build the usage archive.';
+    host.innerHTML='';
+    return;
+  }
+  hint.textContent=`token-level efficiency — exact, covers ${eff.coverage_pct}% of spend (no GitHub join).`;
+  let html='<div style="display:flex;gap:32px;flex-wrap:wrap;margin-bottom:16px">';
+  html+=`<div><strong>${fmtPct(eff.cache_hit_rate)}</strong><div style="color:var(--muted);font-size:12px">cache hit rate (overall)</div></div>`;
+  html+=`<div><strong>${fmtPct(eff.output_share)}</strong><div style="color:var(--muted);font-size:12px">output share (overall)</div></div>`;
+  html+=`<div><strong>$${eff.spend_usd.toFixed(2)}</strong><div style="color:var(--muted);font-size:12px">spend behind this section</div></div>`;
+  html+='</div>';
+  html+='<div style="color:var(--muted);font-size:12px;margin-bottom:4px">cache hit rate over time</div>';
+  html+=drawEfficiencyChart(eff.days);
+  html+='<div style="color:var(--muted);font-size:12px;margin:14px 0 4px">context growth — mean context tokens per call, by call number within a session</div>';
+  const maxMean=Math.max(1, ...eff.context_growth.map(b=>b.mean_ctx||0));
+  for(const b of eff.context_growth) html+=ctxBarRow(b.bucket, b.mean_ctx, maxMean, 620, '#3a6ea5');
+  host.innerHTML=html;
+}
+
 // ---------- header + wiring ----------
 function drawHeader(){
   const days=activeDays();
@@ -293,7 +345,7 @@ function drawHeader(){
   document.getElementById('foot').textContent=
     `Claude: ~/.claude/projects, deduped by message.id, API-equivalent cost. Cursor: local activity plus daily aggregate usage events; Cursor cost uses chargedCents. Raw Cursor events and credentials are never stored.`;
 }
-function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); drawCursorBilling(); drawCursorActivity(); }
+function rerender(){ drawHeader(); drawHeatmap(); drawTimeseries(); drawTopDays(); drawModels(); drawCursorBilling(); drawCursorActivity(); drawEfficiency(); }
 
 document.getElementById('toggle').addEventListener('click', e=>{
   const b=e.target.closest('button'); if(!b) return;

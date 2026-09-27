@@ -35,7 +35,7 @@ import subprocess
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from parse import _jsonl_files, _read, cost_usd, dedupe_messages, local_day, model_class
+from parse import _jsonl_files, _mtime_floor, _read, cost_usd, dedupe_messages, local_day, model_class
 
 SCHEMA_PATH = Path(__file__).parent / "schemas" / "usage-record.schema.json"
 
@@ -247,14 +247,20 @@ def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, unti
     {runner}/{issue}/{execution}/{session}.jsonl. `kind` is always "unknown"
     (Ruling R2, factory#109 not landed); `repo` from the runner map, `issue`
     from the path. A message re-uploaded under a re-run execution counts once,
-    same convention as `parse.factory_day_records`."""
+    same convention as `parse.factory_day_records`.
+
+    Files last modified before `since`'s local midnight are skipped before
+    reading (same `_mtime_floor` invariant `parse.day_records`/`factory_day_records`
+    use: a file that old can't hold a message dated on/after `since`) — the
+    factory transcript mirror can be large, and a narrow `since` (e.g. a live
+    "today" pass) would otherwise read and parse the whole tree on every call."""
     tz = ZoneInfo(tz_name)
     root = Path(root)
     if not root.is_dir():
         return []
     seen_ids = set()
     records = []
-    for f in sorted(_jsonl_files(root)):
+    for f in sorted(_jsonl_files(root, _mtime_floor(since, tz))):
         parts = Path(f).relative_to(root).parts
         if len(parts) < 2:
             continue

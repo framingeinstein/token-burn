@@ -249,6 +249,23 @@ def test_factory_usage_records_uses_repo_map_override(tmp_path):
     assert recs[0]["repo"] == "synkhos/other"
 
 
+def test_factory_usage_records_since_skips_files_not_modified_since(tmp_path):
+    # same `_mtime_floor` invariant as parse.day_records (test_parse.py) — a file
+    # last written before `since`'s local midnight can't hold a message dated
+    # on/after `since`, so it's skipped before being read at all. This matters
+    # because the factory transcript mirror can be large and `since` is often a
+    # narrow "today" window (efficiency.py's live-today pass).
+    import os
+    _factory_session(tmp_path / "lattice" / "71" / "exec-a" / "s.jsonl",
+                     [("m1", "claude-sonnet-4-6", 10)], day="2026-09-25")
+    old = tmp_path / "lattice" / "71" / "exec-a" / "s.jsonl"
+    os.utime(old, (0, 0))                                   # last written 1970
+    recs = factory_usage_records(tmp_path, "UTC", PRICES, since="2026-09-25")
+    assert recs == []                                       # skipped by mtime
+    recs = factory_usage_records(tmp_path, "UTC", PRICES)   # no since => full scan
+    assert len(recs) == 1
+
+
 # --- schema validation (round trip + rejection) ---
 
 def _valid_record(**overrides):

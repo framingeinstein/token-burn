@@ -20,6 +20,8 @@ from prices import load_prices
 from ledger import assemble_rollup, today_str
 from cursor_local import read_cursor_activity
 from cursor_usage import load_cursor_usage
+from efficiency import build_efficiency_payload, collect_usage_records
+from usage_records import resolve_actor as resolve_usage_actor
 
 HERE = Path(__file__).parent
 DEFAULT_CURSOR_DB = Path(
@@ -29,9 +31,10 @@ DEFAULT_CURSOR_DB = Path(
 
 def build_payload(cfg):
     today = cfg.get("today") or today_str(cfg["tz"])
+    prices = load_prices()
     payload = assemble_rollup(
         cfg["ledger"], cfg.get("root") or default_roots(), cfg["tz"], today,
-        prices=load_prices(),
+        prices=prices,
         factory_ledger_path=cfg.get("factory_ledger"),
         factory_root=cfg.get("factory_root"),
     )
@@ -39,6 +42,12 @@ def build_payload(cfg):
         "local": read_cursor_activity(cfg["cursor_db"], cfg["tz"]),
         "billed": load_cursor_usage(cfg["cursor_ledger"]),
     }
+    usage_records = collect_usage_records(
+        cfg.get("usage_dir"), cfg.get("root") or default_roots(), cfg["tz"], prices,
+        cfg.get("actor"), today, factory_root=cfg.get("factory_root"),
+        repo_map=cfg.get("repo_map"),
+    )
+    payload["efficiency"] = build_efficiency_payload(usage_records)
     return payload
 
 
@@ -98,8 +107,19 @@ def main():
     ap.add_argument("--cursor-ledger", default=str(HERE / "cursor-snapshots.jsonl"))
     ap.add_argument("--factory-ledger", default=str(HERE / "factory-snapshots.jsonl"))
     ap.add_argument("--factory-root", default=str(DEFAULT_FACTORY_ROOT))
+    ap.add_argument("--usage-dir", default=str(HERE / "usage"),
+                    help="where finalized usage/<day>.jsonl records are read from")
+    ap.add_argument("--actor", default=None,
+                    help="GitHub login for human:<login> usage records; default: gh api user")
     ap.add_argument("--port", type=int, default=8799)
     args = ap.parse_args()
+
+    # resolved once at startup (not per /api/data request): a single `gh api user`
+    # call, same convention as snapshot.py's usage-record pass.
+    actor = resolve_usage_actor({"actor": args.actor} if args.actor else None)
+    if not actor:
+        print("efficiency section: no actor login (pass --actor or configure gh); "
+              "live-today usage records skipped, finalized archive still reads")
 
     cfg = {
         "root": args.root,
@@ -109,6 +129,8 @@ def main():
         "cursor_ledger": args.cursor_ledger,
         "factory_ledger": args.factory_ledger,
         "factory_root": args.factory_root,
+        "usage_dir": args.usage_dir,
+        "actor": actor,
         "today": None,
     }
     port = choose_port(args.port, 20, _port_free)

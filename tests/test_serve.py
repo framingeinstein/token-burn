@@ -29,6 +29,11 @@ def test_build_payload_assembles_from_ledger_and_logs(tmp_path):
     assert payload["days"][0]["date"] == "2026-05-21"
     assert payload["cursor"]["local"]["status"] == "unavailable"
     assert payload["cursor"]["billed"]["status"] == "unavailable"
+    # Ruling R3: efficiency payload lives under a NEW top-level key; with no
+    # usage_dir/actor configured (not passed in cfg) it degrades gracefully
+    # rather than raising, same as the cursor sub-payloads above.
+    assert payload["efficiency"]["coverage_pct"] == 100.0
+    assert payload["efficiency"]["days"] == []
 
 
 def test_dashboard_and_api_disable_http_caching(tmp_path):
