@@ -47,11 +47,17 @@ def _git_repo(path, remote=None, branch=None):
     return path
 
 
-def _session_text(cwd, calls, day="2026-09-25"):
+def _session_text(cwd, calls, day="2026-09-25", branch=None):
+    """`calls` are `(id, model, out)` or `(id, model, out, gitBranch)`; `branch`
+    is the transcript's `gitBranch` for calls that don't name their own (C2:
+    Claude Code stamps every line with the branch checked out at that moment)."""
     lines = [json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}})]
-    for i, (mid, model, out) in enumerate(calls):
+    for i, call in enumerate(calls):
+        mid, model, out = call[:3]
+        git_branch = call[3] if len(call) > 3 else branch
+        extra = {"gitBranch": git_branch} if git_branch is not None else {}
         lines.append(json.dumps({
-            "type": "assistant", "timestamp": f"{day}T00:{i:02d}:00Z", "cwd": cwd,
+            "type": "assistant", "timestamp": f"{day}T00:{i:02d}:00Z", "cwd": cwd, **extra,
             "message": {"id": mid, "model": model,
                         "usage": {"input_tokens": 2, "output_tokens": out,
                                   "cache_creation_input_tokens": 3,
@@ -169,10 +175,9 @@ def test_local_usage_records_no_remote_yields_repo_null(tmp_path):
 
 
 def test_local_usage_records_fields_and_ctx_buckets(tmp_path):
-    d = _git_repo(tmp_path / "repo", remote="https://github.com/framingeinstein/token-burn.git",
-                  branch="feat/71-widgets")
+    d = _git_repo(tmp_path / "repo", remote="https://github.com/framingeinstein/token-burn.git")
     calls = [(f"m{i}", "claude-opus-4-8", 10) for i in range(1, 8)]  # 7 calls
-    raw = _session_text(str(d), calls)
+    raw = _session_text(str(d), calls, branch="feat/71-widgets")
     recs = local_usage_records(str(tmp_path / "sess-1.jsonl"), raw, "UTC", PRICES,
                                "human:framingeinstein")
     assert len(recs) == 1
@@ -499,8 +504,8 @@ def _fake_git(remote=None, branch=None):
 
 
 def test_branch_with_a_space_is_nulled_but_issue_still_extracted(tmp_path):
-    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)])
-    run = _fake_git(branch="feat/71-fix a bug")   # matches feat/<n>- but fails the branch pattern
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)], branch="feat/71-fix a bug")
+    run = _fake_git()
     recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x", run=run)
     assert len(recs) == 1
     r = recs[0]
@@ -510,15 +515,113 @@ def test_branch_with_a_space_is_nulled_but_issue_still_extracted(tmp_path):
 
 
 def test_branch_with_at_sign_is_nulled(tmp_path):
-    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)])
-    run = _fake_git(branch="feat/71-widgets@2")   # '@' is not in the branch pattern's charset
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)], branch="feat/71-widgets@2")
+    run = _fake_git()
     recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x", run=run)
     assert recs[0]["branch"] is None
     validate_usage_record(recs[0])
 
 
 def test_branch_matching_pattern_is_kept(tmp_path):
-    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)])
-    run = _fake_git(branch="feat/71-widgets")
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)], branch="feat/71-widgets")
+    run = _fake_git()
     recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x", run=run)
     assert recs[0]["branch"] == "feat/71-widgets"
+
+
+# --- C2 (final review): branch per message from the transcript, repo cached persistently ---
+
+def test_two_branches_in_one_session_become_two_records(tmp_path):
+    raw = _session_text("/fake/repo", [
+        ("m1", "claude-opus-4-8", 10, "feat/71-widgets"),
+        ("m2", "claude-opus-4-8", 10, "feat/71-widgets"),
+        ("m3", "claude-opus-4-8", 10, "feat/88-other"),
+    ])
+    recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x",
+                               run=_fake_git(remote="https://github.com/o/r.git"))
+    by_branch = {r["branch"]: r for r in recs}
+    assert set(by_branch) == {"feat/71-widgets", "feat/88-other"}
+    assert by_branch["feat/71-widgets"]["calls"] == 2
+    assert by_branch["feat/71-widgets"]["issue"] == 71
+    assert by_branch["feat/88-other"]["calls"] == 1
+    assert by_branch["feat/88-other"]["issue"] == 88
+    assert all(r["repo"] == "o/r" for r in recs)
+    for r in recs:
+        validate_usage_record(r)
+
+
+def test_branch_never_comes_from_the_cwds_current_checkout(tmp_path, monkeypatch):
+    import usage_records as ur
+    monkeypatch.setattr(ur, "resolve_branch", lambda *a, **k: "feat/999-checked-out-now")
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)], branch="feat/71-widgets")
+    recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x",
+                               run=_fake_git(branch="feat/999-checked-out-now"))
+    assert [r["branch"] for r in recs] == ["feat/71-widgets"]
+    assert recs[0]["issue"] == 71
+
+
+def test_a_transcript_without_gitbranch_records_branch_null(tmp_path):
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)])
+    recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x",
+                               run=_fake_git(branch="feat/999-checked-out-now"))
+    assert recs[0]["branch"] is None and recs[0]["issue"] is None
+
+
+def test_detached_head_gitbranch_is_null(tmp_path):
+    raw = _session_text("/fake/repo", [("m1", "claude-opus-4-8", 10)], branch="HEAD")
+    recs = local_usage_records(str(tmp_path / "s.jsonl"), raw, "UTC", PRICES, "human:x",
+                               run=_fake_git())
+    assert recs[0]["branch"] is None
+
+
+def test_repo_cache_persists_across_instances_and_outlives_a_deleted_worktree(tmp_path):
+    import shutil
+    from usage_records import RepoCache
+    wt = _git_repo(tmp_path / "wt", remote="https://github.com/o/r.git")
+    path = tmp_path / "usage" / "repo-cache.json"
+    cache = RepoCache(path)
+    assert resolve_repo(str(wt), cache=cache) == "o/r"
+    cache.save()
+    shutil.rmtree(wt)                                     # the worktree is gone
+
+    def no_git(*a, **k):
+        raise AssertionError("a cached cwd must not shell out to git")
+
+    later = RepoCache(path)                               # e.g. the next process
+    assert resolve_repo(str(wt), run=no_git, cache=later) == "o/r"
+
+
+def test_repo_cache_never_persists_a_null_resolution(tmp_path):
+    from usage_records import RepoCache
+    path = tmp_path / "repo-cache.json"
+    cache = RepoCache(path)
+    assert resolve_repo("/no/such/dir", run=_fake_git(), cache=cache) is None
+    cache.save()
+    assert "/no/such/dir" not in RepoCache(path)
+
+
+def test_shared_repo_cache_is_process_level_per_path(tmp_path):
+    from usage_records import shared_repo_cache
+    a = shared_repo_cache(tmp_path / "usage")
+    assert shared_repo_cache(tmp_path / "usage") is a
+    assert shared_repo_cache(tmp_path / "other") is not a
+    assert shared_repo_cache(None) is not shared_repo_cache(None)  # no dir: per-call only
+
+
+def test_run_usage_resolves_each_cwd_once_and_persists_the_map(tmp_path):
+    d = _git_repo(tmp_path / "repo", remote="https://github.com/o/r.git")
+    root = tmp_path / "logs"
+    root.mkdir()
+    for n in range(3):
+        (root / f"s{n}.jsonl").write_text(_session_text(
+            str(d), [(f"m{n}", "claude-opus-4-8", 10)], day="2026-09-25", branch="main"))
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.run(cmd, **kw)
+
+    usage_dir = tmp_path / "usage"
+    run_usage(root, "UTC", usage_dir, "human:x", PRICES, today="2026-09-26", run=run)
+    assert len([c for c in calls if "remote" in c]) == 1
+    assert json.loads((usage_dir / "repo-cache.json").read_text()) == {str(d): "o/r"}

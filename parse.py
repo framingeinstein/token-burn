@@ -24,7 +24,10 @@ from prices import load_prices, rate_for
 
 def dedupe_messages(raw_text):
     """One usage record per assistant message.id. Keys: id, model, timestamp,
-    cwd, is_sidechain, in, out, cc, cr, n (occurrence count across content blocks)."""
+    cwd, branch (the line's `gitBranch` -- the branch checked out when the
+    message was written; None when absent), is_sidechain, in, out, cc, cr,
+    n (occurrence count across content blocks). `branch` is read only by
+    usage_records; the token/cost rollup never looks at it."""
     best = {}
     for line in raw_text.splitlines():
         if '"usage"' not in line:
@@ -45,6 +48,7 @@ def dedupe_messages(raw_text):
             "model": msg.get("model"),
             "timestamp": obj.get("timestamp"),
             "cwd": obj.get("cwd"),
+            "branch": obj.get("gitBranch") or None,
             "is_sidechain": bool(obj.get("isSidechain")),
             "in": usage.get("input_tokens", 0) or 0,
             "out": usage.get("output_tokens", 0) or 0,

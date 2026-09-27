@@ -8,10 +8,18 @@ pattern-constrained identifier — so a record is safe to leave the machine
 - `actor` is `human:<github-login>` for local sessions (the login is injectable/
   configurable so no test ever calls the network) or `factory:<runner>` for
   factory transcripts (runner from the bucket path).
-- `repo`/`branch` are resolved from the session's `cwd` via local `git` calls
-  (no network) and cached per cwd; a cwd with no git remote yields `repo: null`,
-  never an error. `issue` comes from a `feat/<n>-...` branch, or from the
-  factory bucket path via a runner -> repo map (plan decision #5).
+- `branch` is taken PER MESSAGE from the transcript's own `gitBranch` (the
+  branch checked out when that message was written -- final review C2), never
+  from the cwd's checkout at snapshot time; one session that switched
+  branches yields one record per branch. A message without `gitBranch` (or
+  a detached `HEAD`) records `branch: null`.
+- `repo` is resolved from the session's `cwd` via a local `git remote` call
+  (no network), cached per cwd in a `RepoCache` that persists non-null
+  results to `<usage_dir>/repo-cache.json` -- so a worktree's remote captured
+  while it existed still resolves after the worktree is deleted. A cwd with no
+  git remote yields `repo: null`, never an error. `issue` comes from a
+  `feat/<n>-...` branch, or from the factory bucket path via a runner -> repo
+  map (plan decision #5).
 - `on_behalf_of`/`requester_source` (the requester slot) are always null here;
   T4 fills them in from the issue.
 - `kind` is "interactive" for local sessions; factory turns are "unknown"
@@ -30,8 +38,10 @@ so other consumers (Synkhos) can read the contract directly.
 """
 import collections
 import json
+import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -99,8 +109,80 @@ def resolve_repo(cwd, run=subprocess.run, cache=None):
     return repo
 
 
+REPO_CACHE_FILENAME = "repo-cache.json"
+
+
+class RepoCache(dict):
+    """`{cwd: "owner/repo" | None}` for `resolve_repo`, optionally backed by an
+    on-disk JSON map (final review C2/I3). Only NON-null resolutions are
+    persisted: a cwd whose remote was captured once (e.g. a live worktree)
+    keeps resolving after the directory is gone, while a cwd with no remote
+    is only negatively cached for this process's lifetime."""
+
+    def __init__(self, path=None):
+        super().__init__()
+        self.path = Path(path) if path else None
+        self._dirty = False
+        self._lock = threading.Lock()
+        if self.path and self.path.exists():
+            try:
+                data = json.loads(self.path.read_text())
+            except Exception:
+                data = {}
+            if isinstance(data, dict):
+                super().update({k: v for k, v in data.items()
+                                if isinstance(k, str) and isinstance(v, str)})
+
+    def __setitem__(self, cwd, repo):
+        if repo is not None and self.get(cwd) != repo:
+            self._dirty = True
+        super().__setitem__(cwd, repo)
+
+    def save(self):
+        """Atomic write (tmp + rename) of the non-null entries, only when
+        something new was resolved. Never raises -- the map is a cache."""
+        if not self.path or not self._dirty:
+            return
+        with self._lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.path.with_name(
+                    f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                with open(tmp, "w") as fh:
+                    json.dump({k: v for k, v in self.items() if v is not None}, fh,
+                              indent=0, sort_keys=True)
+                os.replace(tmp, self.path)
+                self._dirty = False
+            except Exception:
+                pass
+
+
+_SHARED_REPO_CACHES = {}
+_SHARED_REPO_CACHES_LOCK = threading.Lock()
+
+
+def shared_repo_cache(usage_dir):
+    """The process-level `RepoCache` for `usage_dir` (persisted to
+    `<usage_dir>/repo-cache.json`), shared across calls/requests so a
+    long-running server shells out to git at most once per cwd. With no
+    `usage_dir`, a fresh in-memory cache per call (nothing to persist to)."""
+    if not usage_dir:
+        return RepoCache()
+    path = Path(usage_dir) / REPO_CACHE_FILENAME
+    key = str(path)
+    with _SHARED_REPO_CACHES_LOCK:
+        cache = _SHARED_REPO_CACHES.get(key)
+        if cache is None:
+            cache = _SHARED_REPO_CACHES[key] = RepoCache(path)
+        return cache
+
+
 def resolve_branch(cwd, run=subprocess.run):
-    """Current branch name at `cwd`, or None (detached HEAD, no cwd, or error)."""
+    """Current branch name at `cwd`, or None (detached HEAD, no cwd, or error).
+
+    NOT used for usage records (final review C2): the branch checked out NOW
+    says nothing about which branch a past message was written on -- records
+    take the transcript's per-message `gitBranch` instead."""
     if not cwd:
         return None
     try:
@@ -172,6 +254,14 @@ def resolve_factory_repo(runner, repo_map=None, org="synkhos"):
 
 # --- record assembly (pure) -------------------------------------------------
 
+def _message_branch(git_branch):
+    """A transcript `gitBranch` value -> branch name, or None for missing/empty
+    or a detached `HEAD`."""
+    if not git_branch or git_branch == "HEAD":
+        return None
+    return git_branch
+
+
 def _call_entries(recs, tz, prices):
     """One entry per deduped assistant call, numbered 1..n by position within
     the session (the numbering context-growth bucketing needs)."""
@@ -182,6 +272,7 @@ def _call_entries(recs, tz, prices):
         cost = cost_usd(prices, model, day or "", r["in"], r["out"], r["cc"], r["cr"])
         entries.append({
             "call_number": i + 1, "day": day, "id": r.get("id"),
+            "branch": _message_branch(r.get("branch")),
             "model": model, "model_class": model_class(model),
             "in": r["in"], "out": r["out"], "cc": r["cc"], "cr": r["cr"],
             "cost": cost, "ctx": r["in"] + r["cc"] + r["cr"],
@@ -189,18 +280,25 @@ def _call_entries(recs, tz, prices):
     return entries
 
 
-def _build_records(entries, *, actor, repo, branch, issue, session_id, kind,
+def _build_records(entries, *, actor, repo, session_id, kind, issue=None,
                    since=None, until=None):
+    """Group a session's call entries into records by (day, model_class,
+    branch). `branch` is each entry's own (per-message, C2); `issue` is the
+    caller's (factory: from the bucket path) or else derived from the
+    group's branch. The raw branch is used for the issue BEFORE sanitizing,
+    and a branch failing the schema pattern is recorded as null."""
     groups = collections.defaultdict(list)
     for e in entries:
         d = e["day"]
         if d is None or (since and d < since) or (until and d > until):
             continue
-        groups[(d, e["model_class"])].append(e)
+        groups[(d, e["model_class"], e.get("branch"))].append(e)
 
     records = []
-    for (day, mclass) in sorted(groups):
-        es = groups[(day, mclass)]
+    for (day, mclass, raw_branch) in sorted(groups, key=lambda k: (k[0], k[1], k[2] or "")):
+        es = groups[(day, mclass, raw_branch)]
+        branch = sanitize_branch(raw_branch)
+        rec_issue = issue if issue is not None else issue_from_branch(raw_branch)
         buckets = collections.defaultdict(lambda: {"calls": 0, "ctx": 0})
         totals = {"in": 0, "out": 0, "cc": 0, "cr": 0}
         cost = 0.0
@@ -214,7 +312,7 @@ def _build_records(entries, *, actor, repo, branch, issue, session_id, kind,
         records.append({
             "v": 1, "day": day, "actor": actor,
             "on_behalf_of": None, "requester_source": None,
-            "repo": repo, "branch": branch, "issue": issue, "session": session_id,
+            "repo": repo, "branch": branch, "issue": rec_issue, "session": session_id,
             "model": es[0]["model"], "model_class": mclass, "kind": kind,
             "calls": len(es),
             "in": totals["in"], "out": totals["out"], "cc": totals["cc"], "cr": totals["cr"],
@@ -225,21 +323,25 @@ def _build_records(entries, *, actor, repo, branch, issue, session_id, kind,
 
 
 def local_usage_records(file_path, raw_text, tz_name, prices, actor, run=subprocess.run,
-                        repo_cache=None, since=None, until=None):
+                        repo_cache=None, since=None, until=None, recs=None):
     """Usage records for one local Claude Code session transcript. `kind` is
-    always "interactive"; `repo`/`branch`/`issue` come from git at the
-    session's cwd (spec §4.1)."""
+    always "interactive"; `branch` (and the `issue` derived from it) comes
+    per message from the transcript's `gitBranch` (C2); `repo` from git at
+    the session's cwd (spec §4.1), cached in `repo_cache`. `recs` may be
+    passed pre-deduped (the serve.py session memo, I3) instead of
+    re-parsing `raw_text`."""
     tz = ZoneInfo(tz_name)
-    recs = dedupe_messages(raw_text)
+    if recs is None:
+        recs = dedupe_messages(raw_text)
     entries = _call_entries(recs, tz, prices)
+    if not any(e["day"] and (not since or e["day"] >= since) and (not until or e["day"] <= until)
+               for e in entries):
+        return []                              # nothing in range: don't shell out to git
     cwd = next((r["cwd"] for r in recs if r.get("cwd")), None)
     repo = resolve_repo(cwd, run=run, cache=repo_cache)
-    branch = resolve_branch(cwd, run=run)
-    issue = issue_from_branch(branch)          # from the raw branch, before sanitizing
-    branch = sanitize_branch(branch)           # invalid shape -> null, never an invalid record
     session_id = Path(file_path).stem
-    return _build_records(entries, actor=actor, repo=repo, branch=branch, issue=issue,
-                          session_id=session_id, kind="interactive", since=since, until=until)
+    return _build_records(entries, actor=actor, repo=repo, session_id=session_id,
+                          kind="interactive", since=since, until=until)
 
 
 def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, until=None):
@@ -279,9 +381,11 @@ def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, unti
             if mid:
                 seen_ids.add(mid)
             fresh.append(e)
+        for e in fresh:
+            e["branch"] = None                 # factory records carry no branch
         session_id = Path(f).stem
         records.extend(_build_records(
-            fresh, actor=f"factory:{runner}", repo=repo, branch=None, issue=issue,
+            fresh, actor=f"factory:{runner}", repo=repo, issue=issue,
             session_id=session_id, kind="unknown", since=since, until=until))
     return records
 
@@ -431,13 +535,16 @@ def run_usage(root, tz_name, usage_dir, actor, prices, today, factory_root=None,
     usage_dir = Path(usage_dir)
     pre_existing = {p.stem for p in usage_dir.glob("*.jsonl")} if usage_dir.is_dir() else set()
 
+    repo_cache = shared_repo_cache(usage_dir)   # I3/C2: one git call per cwd, persisted
     by_day = collections.defaultdict(list)
     for f in _jsonl_files(root):
         raw = _read(f)
         if raw is None:
             continue
-        for r in local_usage_records(f, raw, tz_name, prices, actor, run=run, since=since):
+        for r in local_usage_records(f, raw, tz_name, prices, actor, run=run,
+                                     repo_cache=repo_cache, since=since):
             by_day[r["day"]].append(r)
+    repo_cache.save()
     if factory_root and Path(factory_root).is_dir():
         for r in factory_usage_records(factory_root, tz_name, prices, repo_map=repo_map,
                                        since=since):
