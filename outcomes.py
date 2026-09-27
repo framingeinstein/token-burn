@@ -277,38 +277,72 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _safe_watermark(processed, first_unprocessed, current):
+    """The watermark after a run over updated-ASCENDING items: the newest
+    processed `updated_at` -- but, when the run stopped early, only one
+    strictly below the first unprocessed item's (a tie at that timestamp
+    would otherwise put the unprocessed item at/below the watermark, and
+    listings stop at `updated_at <= since`). Never moves backwards."""
+    best = current
+    for upd in processed:
+        if not upd:
+            continue
+        if first_unprocessed and upd >= first_unprocessed:
+            continue
+        if not best or upd > best:
+            best = upd
+    return best
+
+
 def _process_issues(repo, repo_state, token, quota, transport, paths, report):
-    """Fetch + record changed issues for `repo`; advances the repo's issue
-    watermark/ETag only past what was actually processed, even if a
-    QuotaFloorHit/GitHubUnreachable cuts the loop short partway through."""
+    """Fetch + record changed issues for `repo` (listed updated-ascending);
+    advances the repo's issue watermark only past what was actually
+    processed, even if a QuotaFloorHit/GitHubUnreachable cuts the loop short
+    partway through. The listing's new ETag is saved ONLY when every listed
+    issue was processed (final review I8): a 304 against it next run would
+    otherwise skip the listed-but-unprocessed ones."""
     issues_state = repo_state.setdefault("issues", {})
-    max_seen = issues_state.get("since")
     items, new_etag, unchanged = list_changed_issues(
         repo, token, quota, transport,
         since=issues_state.get("since"), etag=issues_state.get("etag"))
+    items = sorted(items, key=lambda i: (i.get("updated_at") or "", i.get("number") or 0))
+    processed = []
+    completed = False
     try:
         for issue in items:
             events = issue_timeline(repo, issue["number"], token, quota, transport)
             append_jsonl(paths["issues"], build_issue_record(repo, issue, events))
             report["issues"] += 1
-            upd = issue.get("updated_at")
-            if upd and (not max_seen or upd > max_seen):
-                max_seen = upd
+            processed.append(issue.get("updated_at"))
+        completed = True
     finally:
-        if not unchanged and max_seen:
-            issues_state["since"] = max_seen
-        if new_etag:
+        if not unchanged:
+            first_unprocessed = (None if completed
+                                 else items[len(processed)].get("updated_at"))
+            since = _safe_watermark(processed, first_unprocessed, issues_state.get("since"))
+            if since:
+                issues_state["since"] = since
+        if completed and new_etag:
             issues_state["etag"] = new_etag
 
 
 def _process_prs(repo, repo_state, token, quota, transport, paths, report):
     """Fetch + record closed/merged PRs for `repo`, resolving `closes[]`
     REST-first; advances the repo's PR watermark only past what was actually
-    processed."""
+    processed.
+
+    The listing comes back updated-DESCENDING (it pages back only to the
+    watermark), so it is processed in REVERSE -- oldest first -- and the
+    watermark only ever covers a contiguous processed prefix (final review
+    I8): processing newest-first and then stopping mid-loop used to set the
+    watermark to the newest PR, permanently skipping the older unprocessed
+    ones."""
     prs_state = repo_state.setdefault("prs", {})
     since = prs_state.get("since")
-    max_seen = since
-    prs = list_closed_prs(repo, token, quota, transport, since=since)
+    prs = sorted(list_closed_prs(repo, token, quota, transport, since=since),
+                 key=lambda p: (p.get("updated_at") or "", p.get("number") or 0))
+    processed = []
+    completed = False
     try:
         for pr in prs:
             events = issue_timeline(repo, pr["number"], token, quota, transport)
@@ -317,12 +351,13 @@ def _process_prs(repo, repo_state, token, quota, transport, paths, report):
                 events, token, quota, transport)
             append_jsonl(paths["prs"], build_pr_record(repo, pr, events, closes))
             report["prs"] += 1
-            upd = pr.get("updated_at")
-            if upd and (not max_seen or upd > max_seen):
-                max_seen = upd
+            processed.append(pr.get("updated_at"))
+        completed = True
     finally:
-        if max_seen:
-            prs_state["since"] = max_seen
+        first_unprocessed = None if completed else prs[len(processed)].get("updated_at")
+        new_since = _safe_watermark(processed, first_unprocessed, since)
+        if new_since:
+            prs_state["since"] = new_since
 
 
 def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, owners=DEFAULT_OWNERS, token=None,

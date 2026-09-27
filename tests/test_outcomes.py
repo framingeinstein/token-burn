@@ -488,3 +488,110 @@ def test_fetch_outcomes_one_owner_fails_another_succeeds_isolates_and_reports(tm
     # but outcomes_as_of does NOT advance -- not every owner succeeded
     assert report["outcomes_as_of"] is None
     assert state["outcomes_as_of"] is None
+
+
+# --- I8 (final review): a mid-loop stop must never push unprocessed items below the watermark --
+
+def _pr_item(number, updated_at):
+    return {"number": number, "user": {"login": "jason"}, "state": "closed",
+            "merged_at": updated_at, "head": {"ref": f"feat/{number}-x"},
+            "updated_at": updated_at}
+
+
+def test_pr_watermark_stop_mid_loop_does_not_skip_older_unprocessed_prs(tmp_path):
+    # listed updated-desc: C (newest), B, A (oldest). Processing is ascending,
+    # so A is processed; its timeline response drops the pool below the floor
+    # and B's timeline call is refused -> the watermark may only reach A.
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            _pr_item(3, "2026-09-03T00:00:00Z"), _pr_item(2, "2026-09-02T00:00:00Z"),
+            _pr_item(1, "2026-09-01T00:00:00Z")])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(900), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=transport, quota=Quota(floor_core=1000, floor_graphql=1000))
+    assert report["stopped"] == "quota_floor"
+    paths = cache_paths(tmp_path)
+    prs = read_jsonl_latest(paths["prs"], lambda r: r["number"])
+    assert set(prs) == {1}
+    state = read_state(paths["state"])
+    assert state["repos"]["synkhos/a"]["prs"]["since"] == "2026-09-01T00:00:00Z"
+
+
+def test_pr_watermark_stops_strictly_below_an_unprocessed_tie(tmp_path):
+    # A(t1) processed, B(t2) processed, C(t2) refused: advancing to t2 would
+    # drop C forever (the listing stops at updated_at <= since), so the
+    # watermark stays at t1 and B is simply re-fetched next run.
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            _pr_item(3, "2026-09-02T00:00:00Z"), _pr_item(2, "2026-09-02T00:00:00Z"),
+            _pr_item(1, "2026-09-01T00:00:00Z")])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(5000), [])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(900), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=transport, quota=Quota(floor_core=1000, floor_graphql=1000))
+    assert report["stopped"] == "quota_floor"
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["repos"]["synkhos/a"]["prs"]["since"] == "2026-09-01T00:00:00Z"
+
+
+def test_pr_watermark_advances_to_the_newest_on_completion(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            _pr_item(2, "2026-09-02T00:00:00Z"), _pr_item(1, "2026-09-01T00:00:00Z")])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(5000), [])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(5000), [])],
+    }
+    fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                   transport=ScriptedTransport(script))
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["repos"]["synkhos/a"]["prs"]["since"] == "2026-09-02T00:00:00Z"
+
+
+def test_issue_etag_is_saved_only_when_the_listing_was_fully_processed(tmp_path):
+    paths = cache_paths(tmp_path)
+    write_state(paths["state"], {"repos": {"synkhos/a": {
+        "issues": {"since": "2026-08-01T00:00:00Z", "etag": '"old"'}}},
+        "outcomes_as_of": None})
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(200, rl(5000, {"etag": '"new"'}), [
+            {"number": 1, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-01T00:00:00Z"},
+            {"number": 2, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-02T00:00:00Z"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(900), [])],
+    }
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=ScriptedTransport(script),
+                            quota=Quota(floor_core=1000, floor_graphql=1000))
+    assert report["stopped"] == "quota_floor"
+    issues_state = read_state(paths["state"])["repos"]["synkhos/a"]["issues"]
+    # a 304 on the new ETag next run would skip issue #2 -- so keep the old one
+    assert issues_state["etag"] == '"old"'
+    assert issues_state["since"] == "2026-09-01T00:00:00Z"
+
+
+def test_issue_etag_is_saved_after_a_complete_listing(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(200, rl(5000, {"etag": '"new"'}), [
+            {"number": 1, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-01T00:00:00Z"}])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(5000), [])],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [])],
+    }
+    fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                   transport=ScriptedTransport(script))
+    state = read_state(cache_paths(tmp_path)["state"])
+    assert state["repos"]["synkhos/a"]["issues"]["etag"] == '"new"'
