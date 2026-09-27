@@ -237,7 +237,7 @@ def _base_script(remaining=5000):
 
 def test_fetch_outcomes_304_costs_no_extra_quota_and_writes_nothing(tmp_path):
     transport = ScriptedTransport(_base_script())
-    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
     assert report["issues"] == 0
     assert report["stopped"] is None
     paths = cache_paths(tmp_path)
@@ -263,7 +263,7 @@ def test_fetch_outcomes_processes_new_issues_and_prs(tmp_path):
         ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(5000), [])],
     }
     transport = ScriptedTransport(script)
-    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
     assert report["issues"] == 1
     assert report["prs"] == 1
     assert report["stopped"] is None
@@ -288,7 +288,7 @@ def test_fetch_outcomes_stops_at_quota_floor_keeps_cache_and_watermark(tmp_path)
         ("GET", "/repos/synkhos/a/pulls"): [(200, rl(900), [])],
     }
     transport = ScriptedTransport(script)
-    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport,
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport,
                              quota=Quota(floor_core=1000, floor_graphql=1000))
     assert report["stopped"] == "quota_floor"
     # repo b was never called
@@ -310,7 +310,7 @@ def test_fetch_outcomes_resumes_next_run_from_saved_watermark(tmp_path):
         ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [])],
     }
     transport = ScriptedTransport(script)
-    fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+    fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
     # the saved watermark was sent as `since=` on the resumed run
     assert any("since=2026-09-01T00:00:00Z" in url for _m, url in transport.calls)
 
@@ -323,7 +323,7 @@ def test_fetch_outcomes_unreachable_keeps_cache_and_outcomes_as_of_unchanged(tmp
     def boom(method, url, headers, body=None):
         raise GitHubUnreachable("no network")
 
-    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=boom)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=boom)
     assert report["stopped"] == "unreachable"
     state = read_state(paths["state"])
     assert state["outcomes_as_of"] == "2026-09-01T00:00:00Z"  # unchanged
@@ -344,7 +344,7 @@ def test_fetch_outcomes_never_calls_graphql_in_the_default_path(tmp_path):
             "closingIssuesReferences": {"nodes": []}}}}})],
     }
     transport = ScriptedTransport(script)
-    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
     # this PR's branch doesn't match feat/<n>- and timeline has no links,
     # so REST resolves nothing -> GraphQL IS the right call here (one of the
     # two named cases), and it should be exactly one call.
@@ -353,7 +353,7 @@ def test_fetch_outcomes_never_calls_graphql_in_the_default_path(tmp_path):
 
 # --- fix round 1: non-2xx REST responses must surface, never look like "no data" --
 
-def test_fetch_outcomes_401_on_org_listing_stops_run_keeps_cache_unchanged(tmp_path):
+def test_fetch_outcomes_401_on_owner_listing_stops_run_keeps_cache_unchanged(tmp_path):
     paths = cache_paths(tmp_path)
     write_state(paths["state"], {"repos": {}, "outcomes_as_of": "2026-09-01T00:00:00Z"})
     append_jsonl(paths["issues"], {"repo": "synkhos/a", "number": 1, "state": "open"})
@@ -361,11 +361,11 @@ def test_fetch_outcomes_401_on_org_listing_stops_run_keeps_cache_unchanged(tmp_p
 
     script = {("GET", "/orgs/synkhos/repos"): [(401, rl(4999), {"message": "Bad credentials"})]}
     transport = ScriptedTransport(script)
-    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
 
     assert report["stopped"] == "github_error"
-    assert report["error"]["status"] == 401
-    assert "/orgs/synkhos/repos" in report["error"]["endpoint"]
+    assert report["failures"] == [{"owner": "synkhos", "status": 401,
+                                    "endpoint": transport.calls[0][1]}]
     state = read_state(paths["state"])
     assert state["outcomes_as_of"] == "2026-09-01T00:00:00Z"  # unchanged
     assert paths["issues"].read_text() == before  # cache untouched
@@ -377,11 +377,67 @@ def test_fetch_outcomes_500_on_a_repo_listing_call_stops_run_keeps_watermark(tmp
         ("GET", "/repos/synkhos/a/issues"): [(500, rl(5000), {"message": "Internal error"})],
     }
     transport = ScriptedTransport(script)
-    report = fetch_outcomes(cache_dir=tmp_path, orgs=["synkhos"], token="tok", transport=transport)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok", transport=transport)
 
     assert report["stopped"] == "github_error"
-    assert report["error"]["status"] == 500
-    assert "/repos/synkhos/a/issues" in report["error"]["endpoint"]
+    assert len(report["failures"]) == 1
+    failure = report["failures"][0]
+    assert failure["owner"] == "synkhos"
+    assert failure["repo"] == "synkhos/a"
+    assert failure["status"] == 500
+    assert "/repos/synkhos/a/issues" in failure["endpoint"]
     assert report["outcomes_as_of"] is None  # never advanced
     state = read_state(cache_paths(tmp_path)["state"])
+    assert state["outcomes_as_of"] is None
+
+
+# --- fix round 2 (controller ruling): owners may be orgs or users; per-owner
+# and per-repo isolation for GitHubError ------------------------------------
+
+def test_fetch_outcomes_owner_that_404s_on_orgs_falls_back_to_users(tmp_path):
+    script = {
+        ("GET", "/orgs/framingeinstein/repos"): [(404, rl(4999), {"message": "Not Found"})],
+        ("GET", "/users/framingeinstein/repos"): [(200, rl(4998), [
+            {"full_name": "framingeinstein/site"},
+        ])],
+        ("GET", "/repos/framingeinstein/site/issues"): [(304, rl(4998), None)],
+        ("GET", "/repos/framingeinstein/site/pulls"): [(200, rl(4998), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["framingeinstein"], token="tok", transport=transport)
+
+    assert report["stopped"] is None
+    assert report["failures"] == []
+    assert report["repos_seen"] == ["framingeinstein/site"]
+    assert report["outcomes_as_of"] is not None
+
+
+def test_fetch_outcomes_one_owner_fails_another_succeeds_isolates_and_reports(tmp_path):
+    script = {
+        ("GET", "/orgs/badorg/repos"): [(500, rl(4999), {"message": "boom"})],
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(4998), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(200, rl(4998, {"etag": '"e1"'}), [
+            {"number": 1, "user": {"login": "jason"}, "state": "open", "labels": [],
+             "body": "", "updated_at": "2026-09-01T00:00:00Z"},
+        ])],
+        ("GET", "/repos/synkhos/a/issues/1/timeline"): [(200, rl(4998), [])],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(4998), [])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["badorg", "synkhos"], token="tok", transport=transport)
+
+    # the failing owner is reported, not fatal to the run
+    assert report["stopped"] == "github_error"
+    assert report["failures"] == [{"owner": "badorg", "status": 500,
+                                    "endpoint": transport.calls[0][1]}]
+    # the good owner's repo was fetched, cached, and watermarked
+    assert report["repos_seen"] == ["synkhos/a"]
+    assert report["issues"] == 1
+    paths = cache_paths(tmp_path)
+    issues = read_jsonl_latest(paths["issues"], lambda r: (r["repo"], r["number"]))
+    assert ("synkhos/a", 1) in issues
+    state = read_state(paths["state"])
+    assert state["repos"]["synkhos/a"]["issues"]["etag"] == '"e1"'
+    # but outcomes_as_of does NOT advance -- not every owner succeeded
+    assert report["outcomes_as_of"] is None
     assert state["outcomes_as_of"] is None

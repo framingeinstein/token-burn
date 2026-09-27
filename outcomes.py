@@ -1,4 +1,4 @@
-"""The local outcome cache: PRs and issues for the in-scope orgs, fetched
+"""The local outcome cache: PRs and issues for the in-scope owners, fetched
 incrementally REST-first within a quota floor (spec Sec4.2 / Sec5.2).
 
 This builds the fetcher for the LOCAL personal dashboard (2026-09-27 scope
@@ -28,11 +28,13 @@ from github_client import (
     issue_timeline,
     list_changed_issues,
     list_closed_prs,
-    list_org_repos,
+    list_owner_repos,
 )
 
 DEFAULT_CACHE_DIR = Path("~/.token-burn/outcomes").expanduser()
-DEFAULT_ORGS = ("synkhos", "FramingEinsteinInc", "framingeinstein")
+# In-scope owners -- each may be a GitHub org or a user account (fix round 2:
+# `framingeinstein` is a user, not an org; `list_owner_repos` handles both).
+DEFAULT_OWNERS = ("synkhos", "FramingEinsteinInc", "framingeinstein")
 
 _PTS_LABEL_RE = re.compile(r"^pts:(unrated|\d+)$")
 _ISSUE_BRANCH_RE = re.compile(r"^feat/(\d+)-")
@@ -294,22 +296,31 @@ def _process_prs(repo, repo_state, token, quota, transport, paths, report):
             prs_state["since"] = max_seen
 
 
-def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, orgs=DEFAULT_ORGS, token=None,
+def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, owners=DEFAULT_OWNERS, token=None,
                     get_token=github_token, transport=default_transport, quota=None):
-    """Fetch the outcome cache for `orgs` (REST-first, spec Sec5.2).
+    """Fetch the outcome cache for `owners` (REST-first, spec Sec5.2).
 
-    Stops cleanly at the quota floor, when GitHub is unreachable, or on a
-    surfaced non-2xx REST error (401/403/404/5xx/... -- fix round 1: these
-    used to fall through as "no items" and could report a clean run with
-    nothing actually verified), keeping whatever cache and watermarks already
-    exist; the next run resumes from there. `outcomes_as_of` only advances on
-    a run that finishes every repo without being cut short (spec Sec8: every
-    failure row keeps "outcomes as of" as it was).
+    A `QuotaFloorHit` or `GitHubUnreachable` is process-wide -- either stops
+    the whole run immediately, keeping whatever cache and watermarks already
+    exist; the next run resumes from there.
+
+    A `GitHubError` (401/403/404/5xx/... -- fix round 1: these used to fall
+    through as "no items" and could report a clean run with nothing actually
+    verified) is isolated (fix round 2, controller ruling) to the one owner
+    or repo it happened on: it's recorded in `failures` and the run continues
+    with the remaining owners/repos. Repos that DID succeed still get their
+    records cached and their watermark advanced.
+
+    `outcomes_as_of` only advances when EVERY owner and repo in the run
+    succeeded -- any failure (isolated or not) or a process-wide stop leaves
+    it, and the parts of the cache that weren't touched, unchanged (spec
+    Sec8).
 
     Returns a report: {"issues": n, "prs": n, "calls": {"core": x, "graphql": y},
     "stopped": None | "quota_floor" | "unreachable" | "github_error",
     "repos_seen": [...], "outcomes_as_of": iso-or-None,
-    "error": {"status": int, "endpoint": str} (only when stopped == "github_error")}.
+    "failures": [{"owner": str, "repo": str (only for a repo-level failure),
+                  "status": int, "endpoint": str}, ...]}.
     """
     paths = cache_paths(cache_dir)
     state = read_state(paths["state"])
@@ -319,27 +330,27 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, orgs=DEFAULT_ORGS, token=None,
         raise RuntimeError("no GitHub token (gh auth token failed); configure one explicitly")
 
     report = {"issues": 0, "prs": 0, "calls": quota.calls, "stopped": None,
-              "repos_seen": [], "outcomes_as_of": state.get("outcomes_as_of")}
+              "repos_seen": [], "outcomes_as_of": state.get("outcomes_as_of"),
+              "failures": []}
 
-    try:
-        repos = []
-        for org in orgs:
-            repos.extend(list_org_repos(org, token, quota, transport))
-    except QuotaFloorHit:
-        report["stopped"] = "quota_floor"
-        report["calls"] = dict(quota.calls)
-        return report
-    except GitHubUnreachable:
-        report["stopped"] = "unreachable"
-        report["calls"] = dict(quota.calls)
-        return report
-    except GitHubError as e:
-        report["stopped"] = "github_error"
-        report["error"] = {"status": e.status, "endpoint": e.url}
-        report["calls"] = dict(quota.calls)
-        return report
+    owner_repos = []  # [(owner, repo), ...], only for owners that listed OK
+    for owner in owners:
+        try:
+            repos = list_owner_repos(owner, token, quota, transport)
+        except QuotaFloorHit:
+            report["stopped"] = "quota_floor"
+            report["calls"] = dict(quota.calls)
+            return report
+        except GitHubUnreachable:
+            report["stopped"] = "unreachable"
+            report["calls"] = dict(quota.calls)
+            return report
+        except GitHubError as e:
+            report["failures"].append({"owner": owner, "status": e.status, "endpoint": e.url})
+            continue  # per-owner isolation: keep going with the other owners
+        owner_repos.extend((owner, repo) for repo in repos)
 
-    for repo in repos:
+    for owner, repo in owner_repos:
         report["repos_seen"].append(repo)
         repo_state = state["repos"].setdefault(repo, {})
         try:
@@ -357,15 +368,17 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, orgs=DEFAULT_ORGS, token=None,
             return report
         except GitHubError as e:
             write_state(paths["state"], state)
-            report["stopped"] = "github_error"
-            report["error"] = {"status": e.status, "endpoint": e.url}
-            report["calls"] = dict(quota.calls)
-            return report
+            report["failures"].append({"owner": owner, "repo": repo, "status": e.status, "endpoint": e.url})
+            continue  # per-repo isolation: keep going with the other repos
         write_state(paths["state"], state)
 
-    state["outcomes_as_of"] = _now_iso()
-    write_state(paths["state"], state)
-    report["outcomes_as_of"] = state["outcomes_as_of"]
+    if not report["failures"]:
+        state["outcomes_as_of"] = _now_iso()
+        write_state(paths["state"], state)
+        report["outcomes_as_of"] = state["outcomes_as_of"]
+    elif report["stopped"] is None:
+        report["stopped"] = "github_error"
+
     report["calls"] = dict(quota.calls)
     return report
 
@@ -375,8 +388,8 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, orgs=DEFAULT_ORGS, token=None,
 def main():
     ap = argparse.ArgumentParser(description="Fetch the local GitHub outcome cache (issues + PRs).")
     ap.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
-    ap.add_argument("--org", action="append", dest="orgs", default=None,
-                     help="org to fetch (repeatable); default: %s" % ", ".join(DEFAULT_ORGS))
+    ap.add_argument("--owner", action="append", dest="owners", default=None,
+                     help="org or user to fetch (repeatable); default: %s" % ", ".join(DEFAULT_OWNERS))
     ap.add_argument("--floor-core", type=int, default=None)
     ap.add_argument("--floor-graphql", type=int, default=None)
     args = ap.parse_args()
@@ -388,7 +401,7 @@ def main():
         quota_kwargs["floor_graphql"] = args.floor_graphql
     quota = Quota(**quota_kwargs) if quota_kwargs else None
 
-    report = fetch_outcomes(cache_dir=args.cache_dir, orgs=args.orgs or DEFAULT_ORGS, quota=quota)
+    report = fetch_outcomes(cache_dir=args.cache_dir, owners=args.owners or DEFAULT_OWNERS, quota=quota)
     print(json.dumps(report, indent=2))
     if report["stopped"]:
         raise SystemExit(1 if report["stopped"] in ("unreachable", "github_error") else 0)

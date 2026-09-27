@@ -197,11 +197,27 @@ def rest_pages(url, token, quota, transport, etag=None, stop=None):
 
 # --- REST calls --------------------------------------------------------
 
-def list_org_repos(org, token, quota, transport):
-    """Every repo in `org` (full `owner/name`), spec Sec5.2's org enumeration."""
-    url = f"{API_ROOT}/orgs/{org}/repos?per_page=100&type=all"
+def list_owner_repos(owner, token, quota, transport):
+    """Every repo belonging to `owner` (full `owner/name`), spec Sec5.2's
+    enumeration -- extended (fix round 2) to cover both shapes an in-scope
+    name can be: an org or a user account. Tries `/orgs/{owner}/repos`
+    first; on a 404 (not an org) falls back to `/users/{owner}/repos`. Any
+    other `GitHubError` (401/403/5xx/...) is NOT retried -- it propagates so
+    the caller can isolate it to this one owner."""
+    org_url = f"{API_ROOT}/orgs/{owner}/repos?per_page=100&type=all"
+    try:
+        repos = []
+        for _status, items, _headers in rest_pages(org_url, token, quota, transport):
+            if items:
+                repos.extend(items)
+        return [r["full_name"] for r in repos]
+    except GitHubError as e:
+        if e.status != 404:
+            raise
+
+    user_url = f"{API_ROOT}/users/{owner}/repos?per_page=100&type=all"
     repos = []
-    for _status, items, _headers in rest_pages(url, token, quota, transport):
+    for _status, items, _headers in rest_pages(user_url, token, quota, transport):
         if items:
             repos.extend(items)
     return [r["full_name"] for r in repos]

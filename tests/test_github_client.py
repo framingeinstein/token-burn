@@ -14,7 +14,7 @@ from github_client import (
     issue_timeline,
     list_changed_issues,
     list_closed_prs,
-    list_org_repos,
+    list_owner_repos,
     next_page_url,
     rest_pages,
 )
@@ -159,12 +159,35 @@ def test_rest_pages_stop_predicate_truncates_and_halts_paging():
 
 # --- higher-level REST calls -------------------------------------------
 
-def test_list_org_repos_paginates_and_returns_full_names():
+def test_list_owner_repos_paginates_and_returns_full_names():
     q = Quota()
     transport = FakeTransport([
         (200, rl(100), [{"full_name": "synkhos/a"}, {"full_name": "synkhos/b"}]),
     ])
-    assert list_org_repos("synkhos", "tok", q, transport) == ["synkhos/a", "synkhos/b"]
+    assert list_owner_repos("synkhos", "tok", q, transport) == ["synkhos/a", "synkhos/b"]
+
+
+def test_list_owner_repos_falls_back_to_users_on_404(monkeypatch):
+    # fix round 2: an in-scope name may be a user account, not an org --
+    # /orgs/{owner}/repos 404s, so /users/{owner}/repos is tried next.
+    q = Quota()
+    transport = FakeTransport([
+        (404, rl(4999), {"message": "Not Found"}),
+        (200, rl(4998), [{"full_name": "framingeinstein/site"}]),
+    ])
+    result = list_owner_repos("framingeinstein", "tok", q, transport)
+    assert result == ["framingeinstein/site"]
+    assert transport.calls[0]["url"].startswith("https://api.github.com/orgs/framingeinstein/repos")
+    assert transport.calls[1]["url"].startswith("https://api.github.com/users/framingeinstein/repos")
+
+
+def test_list_owner_repos_does_not_fall_back_on_non_404_error():
+    q = Quota()
+    transport = FakeTransport([(500, rl(4999), {"message": "boom"})])
+    with pytest.raises(GitHubError) as exc:
+        list_owner_repos("synkhos", "tok", q, transport)
+    assert exc.value.status == 500
+    assert len(transport.calls) == 1  # never tried /users
 
 
 def test_list_changed_issues_unchanged_304_costs_no_extra_quota_and_returns_empty():
@@ -286,8 +309,8 @@ def test_rest_pages_raises_github_error_on_404():
     assert exc.value.status == 404
 
 
-def test_list_org_repos_propagates_github_error():
+def test_list_owner_repos_propagates_github_error():
     q = Quota()
     transport = FakeTransport([(403, rl(4999), {"message": "secondary rate limit"})])
     with pytest.raises(GitHubError):
-        list_org_repos("synkhos", "tok", q, transport)
+        list_owner_repos("synkhos", "tok", q, transport)
