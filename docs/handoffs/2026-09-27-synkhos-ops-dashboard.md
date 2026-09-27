@@ -26,7 +26,22 @@ Write `company-context/docs/plans/factory/2026-09-27-card-rating-plan.md`, citin
 | R3 | R3 · Points and requester appear as board fields that follow the labels | A **Points** number field and a **Requester** text field on rollup #4 and on each product board, set one way from the label and header line over Projects v2 REST. Drift is reset and reported; a human label change wins, with the actor recorded (R-7). | A board view sums Points per status (screenshot). An edited field is reset on the next reconcile and appears in the drift report. Changing the label updates the field, and the timeline actor is recorded. Calls stay above the quota floor (spec §5.2). | R1, R2 |
 | R4 | R4 · Past cards are rated and attributed | Existing issues without `pts:` are rated from their original body, missing requester lines are backfilled from the author, and fields are mirrored. It has a dry run, resumes after interruption, obeys the quota floor, and produces a calibration report re-rating 10% (R-12, spec §7.5). | A dry-run report on one repo lists the planned changes with no writes. A real run on that repo reads back labels, comments and fields. An interrupted run resumes without re-rating. The calibration report shows ≥80% exact and 100% within one step, or lists the misses. | R1, R2, R3 |
 
-**Decisions the spec still needs (ask Jason):** which ~8 real cards form the reference set, and their agreed points (blocks R1). Whether the rater's Claude usage is itself attributed (it's small, but it is spend).
+**Reference set v1 (approved by Jason, 2026-09-27):**
+
+| pts | card |
+|---|---|
+| 1 | synkhos/nexus#58 |
+| 2 | synkhos/hub#60 |
+| 3 | synkhos/knitr#52 |
+| 5 | synkhos/factory#115 |
+| 5 | synkhos/nexus#84 |
+| 8 | synkhos/lattice#304 |
+| 8 | synkhos/spine#5 |
+| 13 | synkhos/harness#418 |
+
+Chosen on spec complexity; actual spend was only a sanity check. Put this table in the R1 card.
+
+**Still to ask Jason:** whether the rater's own Claude usage is attributed (it's small, but it is spend).
 
 ### 2. Ops-dashboard plan
 
