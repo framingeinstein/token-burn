@@ -79,3 +79,31 @@ def test_main_with_actor_writes_ledger_and_usage_records_without_gh(tmp_path, mo
     lines = (usage_dir / "2026-05-21.jsonl").read_text().splitlines()
     recs = [json.loads(l) for l in lines if l.strip()]
     assert recs and {r["actor"] for r in recs} == {"human:jason-m"}
+
+
+def test_main_passes_this_machines_actor_to_the_team_upload(tmp_path, monkeypatch):
+    """I7: snapshot.py hands its resolved human actor to the team upload, which
+    sends only that actor's records."""
+    import sys
+    import snapshot
+    import usage_records
+
+    monkeypatch.setattr(usage_records, "default_login", lambda *a, **k: None)
+    monkeypatch.setattr(snapshot, "load_team_config",
+                        lambda: {"door_url": "https://door.example/upload", "tenant": "t"})
+    seen = {}
+
+    def fake_upload(usage_dir, config, **kw):
+        seen.update(kw)
+        return {"sent": [], "refused": {}, "invalid": {}, "unreachable": {}}
+
+    monkeypatch.setattr(snapshot, "upload_pending_days", fake_upload)
+    monkeypatch.setattr(sys, "argv", [
+        "snapshot.py", "--root", str(FIX), "--tz", "UTC",
+        "--ledger", str(tmp_path / "s.jsonl"), "--skip-cursor", "--skip-factory",
+        "--usage-dir", str(tmp_path / "usage"),
+        "--team-upload-state", str(tmp_path / "team-state.json"),
+        "--actor", "jason-m",
+    ])
+    snapshot.main()
+    assert seen["actor"] == "human:jason-m"

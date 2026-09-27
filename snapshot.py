@@ -132,9 +132,16 @@ def main():
                 "cursor usage: not configured "
                 f"(token file: {args.cursor_token_file})"
             )
-    if not args.skip_usage:
+    # this machine's human actor: resolved once, used by the usage-record pass
+    # and (I7) to send only this machine's own records to the team door.
+    actor = None
+    if not (args.skip_usage and args.skip_team_upload):
         try:
             actor = resolve_usage_actor({"actor": args.actor} if args.actor else None)
+        except Exception as exc:
+            print(f"  WARNING: actor resolution failed: {exc}")
+    if not args.skip_usage:
+        try:
             if actor:
                 factory_root = (args.factory_root if not args.skip_factory
                                 and os.path.isdir(args.factory_root) else None)
@@ -156,8 +163,10 @@ def main():
         try:
             team_config = load_team_config()
             if team_config:
-                result = upload_pending_days(args.usage_dir, team_config,
+                result = upload_pending_days(args.usage_dir, team_config, actor=actor,
                                              state_path=args.team_upload_state)
+                if result.get("skipped_reason"):
+                    print(f"team upload: skipped ({result['skipped_reason']})")
                 print(f"team upload: +{len(result['sent'])} day(s) sent"
                       + (f"; refused={sorted(result['refused'])}" if result["refused"] else "")
                       + (f"; unreachable={sorted(result['unreachable'])}" if result["unreachable"] else "")

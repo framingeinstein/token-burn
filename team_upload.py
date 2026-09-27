@@ -28,6 +28,11 @@ guess, built against an injectable HTTP `transport` and a pluggable
   `schemas/usage-record.schema.json` (T1's validator) before sending; a day
   with any invalid record is refused locally -- the door would refuse the
   whole batch anyway -- and reported, never sent (spec §8).
+- **Only this machine's own records.** A day file also holds `factory:*`
+  records (from the local factory-transcript mirror) and could hold another
+  human's; the factory reports its own records (Amendment A-2 / spec §9), so
+  only records whose `actor` is this machine's human actor (`actor=`) are
+  sent (final review I7). No actor configured sends nothing.
 - **Idempotence.** A small local upload-state file
   (`~/.token-burn/team-upload-state.json` by default) records, per day,
   whether it was accepted and a content hash of what was sent. A day
@@ -200,7 +205,7 @@ def _now_iso():
 
 # --- the upload pass: called from snapshot.py, after local finalization ----
 
-def upload_pending_days(usage_dir, config, *, state_path=DEFAULT_STATE_PATH,
+def upload_pending_days(usage_dir, config, *, actor, state_path=DEFAULT_STATE_PATH,
                         transport=default_transport,
                         credential_provider=default_credential_provider,
                         now=None):
@@ -212,7 +217,10 @@ def upload_pending_days(usage_dir, config, *, state_path=DEFAULT_STATE_PATH,
 
     Otherwise returns `{"sent": [...days], "refused": {day: reason},
     "invalid": {day: reason}, "unreachable": {day: reason}}` -- a day
-    appears in at most one bucket. Never raises: a failure for one day
+    appears in at most one bucket. Only records whose `actor` equals `actor`
+    (this machine's `human:<login>`, final review I7) are validated, hashed
+    and sent; a day with none of them is skipped. A falsy `actor` sends
+    nothing and touches no state (`skipped_reason` says why). Never raises: a failure for one day
     (including one this function didn't anticipate -- a raising
     `credential_provider`, a transport bug, ...) is recorded and the run
     moves on to the next day. `usage_dir`'s finalized archives are only ever
@@ -225,14 +233,18 @@ def upload_pending_days(usage_dir, config, *, state_path=DEFAULT_STATE_PATH,
     the same run hit an unexpected error."""
     if not config:
         return None
+    result = {"sent": [], "refused": {}, "invalid": {}, "unreachable": {}}
+    if not actor:
+        result["skipped_reason"] = "no actor login -- can't tell this machine's records apart"
+        return result
     now = now or _now_iso()
     state = read_upload_state(state_path)
     days_state = state.setdefault("days", {})
-    result = {"sent": [], "refused": {}, "invalid": {}, "unreachable": {}}
 
     for day in _usage_days(usage_dir):
         try:
-            records = read_usage_records(usage_dir, day)
+            records = [r for r in read_usage_records(usage_dir, day)
+                       if r.get("actor") == actor]
             if not records:
                 continue
 

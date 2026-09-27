@@ -48,6 +48,7 @@ class ScriptedTransport:
 
 
 CONFIG = {"door_url": "https://door.example/upload", "tenant": "framingeinstein"}
+ME = "human:framingeinstein"   # this machine's human actor (matches _valid_record's)
 
 
 def _cred():
@@ -82,7 +83,7 @@ def test_upload_pending_days_no_team_configured_sends_nothing(tmp_path):
     append_usage_records(usage_dir, "2026-09-25", [_valid_record()])
     transport = ScriptedTransport()
     state_path = tmp_path / "state.json"
-    result = tu.upload_pending_days(usage_dir, None, state_path=state_path,
+    result = tu.upload_pending_days(usage_dir, None, state_path=state_path, actor=ME,
                                      transport=transport, credential_provider=_cred)
     assert result is None
     assert transport.calls == []
@@ -99,7 +100,7 @@ def test_day_sent_once_and_not_resent_after_success(tmp_path):
     state_path = tmp_path / "state.json"
     transport = ScriptedTransport({"2026-09-25": [(202, {}, None)]})
 
-    r1 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    r1 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                  transport=transport, credential_provider=_cred)
     assert r1["sent"] == ["2026-09-25"]
     assert len(transport.calls) == 1
@@ -110,7 +111,7 @@ def test_day_sent_once_and_not_resent_after_success(tmp_path):
                             "records": [_valid_record()]}
 
     # second run: door not called again for this day, "sent" is empty
-    r2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    r2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                  transport=transport, credential_provider=_cred)
     assert r2["sent"] == []
     assert len(transport.calls) == 1  # unchanged
@@ -125,7 +126,7 @@ def test_refusal_is_reported_with_reason_and_retried_next_run(tmp_path):
     refusal_body = {"error": "invalid_tenant", "message": "unknown tenant", "code": "E_TENANT"}
     transport = ScriptedTransport({"2026-09-25": [(422, {}, refusal_body), (202, {}, None)]})
 
-    r1 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    r1 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                  transport=transport, credential_provider=_cred)
     assert r1["refused"] == {"2026-09-25": refusal_body}
     assert r1["sent"] == []
@@ -135,7 +136,7 @@ def test_refusal_is_reported_with_reason_and_retried_next_run(tmp_path):
     assert status["last_success_at"] is None
 
     # retried next run (transport called again) and this time accepted
-    r2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    r2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                  transport=transport, credential_provider=_cred)
     assert r2["sent"] == ["2026-09-25"]
     assert len(transport.calls) == 2
@@ -149,7 +150,7 @@ def test_door_unreachable_is_recorded_and_does_not_raise(tmp_path):
     state_path = tmp_path / "state.json"
     transport = ScriptedTransport(unreachable_days={"2026-09-25"})
 
-    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                      transport=transport, credential_provider=_cred)
     assert "2026-09-25" in result["unreachable"]
     # local usage archive is untouched
@@ -173,7 +174,7 @@ def test_invalid_day_is_not_sent_and_is_reported(tmp_path):
     state_path = tmp_path / "state.json"
     transport = ScriptedTransport()
 
-    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                      transport=transport, credential_provider=_cred)
     assert transport.calls == []  # never sent
     assert "2026-09-25" in result["invalid"]
@@ -188,13 +189,13 @@ def test_refinalized_day_with_changed_content_is_resent(tmp_path):
     state_path = tmp_path / "state.json"
     transport = ScriptedTransport({"2026-09-25": [(202, {}, None), (202, {}, None)]})
 
-    r1 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    r1 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                  transport=transport, credential_provider=_cred)
     assert r1["sent"] == ["2026-09-25"]
 
     # --refinalize appends a newer line for the same day with different content
     append_usage_records(usage_dir, "2026-09-25", [_valid_record(session="sess-2")])
-    r2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    r2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                  transport=transport, credential_provider=_cred)
     assert r2["sent"] == ["2026-09-25"]
     assert len(transport.calls) == 2
@@ -224,7 +225,7 @@ def test_missing_credential_is_recorded_as_unreachable_not_a_crash(tmp_path):
     state_path = tmp_path / "state.json"
     transport = ScriptedTransport()
 
-    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                      transport=transport, credential_provider=lambda: None)
     assert transport.calls == []
     assert "2026-09-25" in result["unreachable"]
@@ -242,7 +243,7 @@ def test_raising_credential_provider_is_recorded_not_propagated(tmp_path):
     def bad_credential():
         raise RuntimeError("no keychain access")
 
-    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                      transport=transport, credential_provider=bad_credential)
     assert transport.calls == []
     assert "no keychain access" in result["unreachable"]["2026-09-25"]
@@ -261,7 +262,7 @@ def test_unexpected_error_for_one_day_does_not_lose_another_days_progress(tmp_pa
             return 202, {}, None
         raise RuntimeError("boom")  # not DoorUnreachable -- an unanticipated bug
 
-    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                      transport=flaky_transport, credential_provider=_cred)
     assert result["sent"] == ["2026-09-25"]
     assert "boom" in result["unreachable"]["2026-09-26"]
@@ -277,7 +278,7 @@ def test_unexpected_error_for_one_day_does_not_lose_another_days_progress(tmp_pa
         assert body["day"] == "2026-09-26", "day 1 must not be resent after success"
         return 202, {}, None
 
-    result2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    result2 = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                      transport=transport_2nd_run, credential_provider=_cred)
     assert result2["sent"] == ["2026-09-26"]
 
@@ -324,8 +325,50 @@ def test_malformed_2xx_body_end_to_end_is_sent_not_unreachable(tmp_path):
     def malformed_body_transport(method, url, headers, body=None):
         return 202, {}, None  # what default_transport itself now returns for this case
 
-    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path,
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
                                      transport=malformed_body_transport,
                                      credential_provider=_cred)
     assert result["sent"] == ["2026-09-25"]
     assert result["unreachable"] == {}
+
+
+# --- I7 (final review): only THIS machine's own human records leave it ------
+
+def test_upload_sends_only_this_machines_own_human_records(tmp_path):
+    usage_dir = tmp_path / "usage"
+    state_path = tmp_path / "state.json"
+    mine = _valid_record(session="mine")
+    factory = _valid_record(actor="factory:wb-impl-lattice", kind="unknown", branch=None,
+                            session="fac")
+    other_human = _valid_record(actor="human:ricky", session="theirs")
+    append_usage_records(usage_dir, "2026-09-25", [mine, factory, other_human])
+    transport = ScriptedTransport({"2026-09-25": [(200, {}, {"ok": True})]})
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
+                                    transport=transport, credential_provider=_cred)
+    assert result["sent"] == ["2026-09-25"]
+    sent = transport.calls[0]["body"]["records"]
+    assert [r["session"] for r in sent] == ["mine"]
+
+
+def test_a_day_with_only_factory_records_is_never_sent(tmp_path):
+    usage_dir = tmp_path / "usage"
+    state_path = tmp_path / "state.json"
+    append_usage_records(usage_dir, "2026-09-25", [
+        _valid_record(actor="factory:wb-impl-lattice", kind="unknown", branch=None)])
+    transport = ScriptedTransport()
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=ME,
+                                    transport=transport, credential_provider=_cred)
+    assert transport.calls == []
+    assert result["sent"] == [] and result["unreachable"] == {} and result["invalid"] == {}
+
+
+def test_no_actor_sends_nothing(tmp_path):
+    usage_dir = tmp_path / "usage"
+    state_path = tmp_path / "state.json"
+    append_usage_records(usage_dir, "2026-09-25", [_valid_record()])
+    transport = ScriptedTransport()
+    result = tu.upload_pending_days(usage_dir, CONFIG, state_path=state_path, actor=None,
+                                    transport=transport, credential_provider=_cred)
+    assert transport.calls == []
+    assert result["sent"] == [] and "actor" in result["skipped_reason"]
+    assert not state_path.exists()
