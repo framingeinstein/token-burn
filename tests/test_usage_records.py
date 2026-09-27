@@ -332,6 +332,24 @@ def test_null_repo_branch_issue_are_valid():
     validate_usage_record(_valid_record(repo=None, branch=None, issue=None))
 
 
+# --- requester_source enum (controller ruling R8): the canonical values are
+# "requested_by" | "author" | null -- this schema is the contract the Synkhos
+# upload door (synkhos/factory#171) validates against, so both values must
+# round-trip and the old, wrong "header" value must be rejected. ------------
+
+def test_requester_source_requested_by_round_trips():
+    validate_usage_record(_valid_record(requester_source="requested_by"))
+
+
+def test_requester_source_author_round_trips():
+    validate_usage_record(_valid_record(requester_source="author"))
+
+
+def test_requester_source_header_is_rejected():
+    with pytest.raises(SchemaError):
+        validate_usage_record(_valid_record(requester_source="header"))
+
+
 def test_schema_file_is_published_and_loadable():
     assert SCHEMA_PATH.exists()
     schema = load_schema()

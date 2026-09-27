@@ -18,7 +18,7 @@
       "pattern": "^(human:[A-Za-z0-9-]{1,39}|factory:[A-Za-z0-9._-]{1,64})$"
     },
     "on_behalf_of": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9-]{1,39}$"},
-    "requester_source": {"type": ["string", "null"], "enum": [null, "header", "author"]},
+    "requester_source": {"type": ["string", "null"], "enum": [null, "requested_by", "author"]},
     "repo": {
       "type": ["string", "null"],
       "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
