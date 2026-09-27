@@ -37,6 +37,25 @@ fi
 
 mkdir -p "$LOGDIR" "$(dirname "$PLIST")"
 
+# launchd starts the server with PATH=/usr/bin:/bin, where Homebrew's `gh` is invisible,
+# so serve.py can't resolve the actor login itself and the Outcomes / Efficiency "Me"
+# view comes up empty. Resolve the login ONCE here (TOKEN_BURN_ACTOR wins, else
+# `gh api user`) and pass it as --actor, and give the agent a PATH that finds `gh` --
+# the same fix install-cron.sh applies to the 09:00 chain.
+ACTOR="${TOKEN_BURN_ACTOR:-}"
+if [ -z "$ACTOR" ] && command -v gh >/dev/null 2>&1; then
+  ACTOR="$(gh api user --jq .login 2>/dev/null || true)"
+fi
+ACTOR_XML=""
+if printf '%s' "$ACTOR" | grep -Eq '^[A-Za-z0-9-]{1,39}$'; then
+  ACTOR_XML="      <string>--actor</string>
+      <string>$ACTOR</string>"
+else
+  echo "WARNING: could not resolve a GitHub login (set TOKEN_BURN_ACTOR or run 'gh auth login');" \
+       "installing without --actor -- the Outcomes section will show 'unavailable'." >&2
+fi
+AGENT_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
 # Paths are baked in absolute (launchd has no shell profile / PATH). XML-escape '&' so a
 # repo path containing one can't corrupt the plist.
 esc() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
@@ -53,6 +72,7 @@ cat > "$PLIST" <<PLIST
       <string>$(esc "$DIR/serve.py")</string>
       <string>--port</string>
       <string>$PORT</string>
+$ACTOR_XML
     </array>
     <key>WorkingDirectory</key>
     <string>$(esc "$DIR")</string>
@@ -60,6 +80,8 @@ cat > "$PLIST" <<PLIST
     <dict>
       <key>PYTHONUNBUFFERED</key>
       <string>1</string>
+      <key>PATH</key>
+      <string>$AGENT_PATH</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
