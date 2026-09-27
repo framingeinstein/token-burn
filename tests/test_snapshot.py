@@ -46,3 +46,36 @@ def test_refinalize_reappends_and_latest_wins(tmp_path):
     assert added == 1
     # still one logical day after dedup-on-read
     assert set(read_ledger(led)) == {"2026-05-21"}
+
+
+# --- C1 (final review): snapshot.py main() smoke test with --actor -----------
+
+def test_main_with_actor_writes_ledger_and_usage_records_without_gh(tmp_path, monkeypatch):
+    """The cron line passes `--actor <login>` (resolved at install time), so the
+    usage-record pass must run without ever calling `gh api user`."""
+    import json
+    import sys
+    import snapshot
+    import usage_records
+
+    def no_gh(*a, **k):
+        raise AssertionError("gh api user must not be called when --actor is given")
+
+    monkeypatch.setattr(usage_records, "default_login", no_gh)
+    monkeypatch.setattr(snapshot, "load_team_config", lambda: None)
+    usage_dir = tmp_path / "usage"
+    monkeypatch.setattr(sys, "argv", [
+        "snapshot.py", "--root", str(FIX), "--tz", "UTC",
+        "--ledger", str(tmp_path / "s.jsonl"),
+        "--cursor-ledger", str(tmp_path / "c.jsonl"), "--skip-cursor",
+        "--factory-root", str(tmp_path / "no-factory"),
+        "--factory-ledger", str(tmp_path / "f.jsonl"),
+        "--usage-dir", str(usage_dir),
+        "--team-upload-state", str(tmp_path / "team-state.json"),
+        "--actor", "jason-m",
+    ])
+    snapshot.main()
+    assert "2026-05-21" in read_ledger(str(tmp_path / "s.jsonl"))
+    lines = (usage_dir / "2026-05-21.jsonl").read_text().splitlines()
+    recs = [json.loads(l) for l in lines if l.strip()]
+    assert recs and {r["actor"] for r in recs} == {"human:jason-m"}
