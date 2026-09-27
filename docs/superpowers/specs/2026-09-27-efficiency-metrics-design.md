@@ -1,7 +1,7 @@
 # Efficiency & productivity metrics — design
 
 **Date:** 2026-09-27
-**Status:** Design agreed in session (Jason); written spec awaiting review.
+**Status:** Approved (Jason, 2026-09-27). Plan: [token-burn plan](../../plans/2026-09-27-efficiency-metrics-plan.md); Synkhos plans and all card filing handed off.
 **Repos:** `framingeinstein/token-burn` (collectors, outcomes, joins, dashboard, team mode) · `synkhos/factory` (`skills/rating-cards`, `filing-cards` changes).
 **Follow-on:** Synkhos ops-dashboard integration (§9), handed to a Synkhos session ([handoff](../../handoffs/2026-09-27-synkhos-ops-dashboard.md)).
 
@@ -170,43 +170,41 @@ The existing page and sections are unchanged. With no team and no outcomes confi
 
 It uses the existing visual vocabulary (bars, tables, tiles) and the existing tokens-vs-$ toggle.
 
-## 7. Card rating — `synkhos/factory/skills/rating-cards`
+## 7. Card rating — a `rating-cards` skill in `synkhos/factory`
 
-It lives next to `skills/filing-cards` in `synkhos/factory` and is installed the same way.
+It lives next to the `filing-cards` skill in `synkhos/factory` and is installed the same way. This section fixes **decisions and contracts**; how it's built is left to the factory runner.
 
-### 7.1 Rater
+### 7.1 Rater (decisions)
 
-- **Scripts:** `scripts/rate_card.py` rates one issue; `scripts/rate_cards.py` does backfill and reconcile.
-- **Model:** a fixed rater. `claude -p --model sonnet` with a versioned rubric plus a versioned **reference set** of about 8 agreed real cards spanning 1–13. It is never the filing agent's own judgement.
-- **Input:** title and body only. The rater never sees PRs, diffs, comments or cost. For backfill, the body **as originally filed** (§5.2 `userContentEdits`).
-- **Rubric dimensions:** uncertainty (new design vs existing pattern) · surface (modules/repos; `cross-repo`) · verification (number of Done-when checks and failure modes) · coupling (dependencies; contract or schema change).
-- **Output:** points on the 1/2/3/5/8/13 scale.
-  - When the body is too thin to rate (e.g. no Done-when), output `pts:unrated` with a reason.
-  - When the rater itself fails, output `pts:unrated` with reason `rater-error`.
+- **R-1 · Fixed rater.** Ratings come from a fixed model (Sonnet) with a versioned rubric and a versioned **reference set** of about 8 agreed real cards spanning 1–13. They are never the filing agent's own judgement.
+- **R-2 · Blind input.** Title and body only. The rater never sees PRs, diffs, comments or cost. For backfill, it rates the body **as originally filed**, not later edits.
+- **R-3 · Rubric dimensions.** Uncertainty (new design vs existing pattern) · surface (modules/repos; `cross-repo`) · verification (number of Done-when checks and failure modes) · coupling (dependencies; contract or schema change).
+- **R-4 · Scale.** 1/2/3/5/8/13.
+  - A body too thin to rate (e.g. no Done-when) is `unrated` with a reason.
+  - A rater failure is `unrated` with reason `rater-error`.
 
-### 7.2 Storage
+### 7.2 Storage (contracts consumers rely on)
 
-- **Label `pts:N` is the source of truth.** It's portable across orgs and boards and readable with plain `gh`. Its change history (who, when) comes free from the issue timeline.
-- **Rating comment:** `<!-- rating v<rubric> ref<set> model=<id> --> N pts: <one-line rationale>`.
-- **Board mirror:** a **Points** number field on rollup #4 and on each product board the card is on, one way (label → field) via Projects v2 REST. This enables sum, sort and numeric filters in GitHub views.
-- **Reconcile:** `rate_cards.py --reconcile` sets any drifted field back from the label and reports the drift. The convention is **override on the label, not the field.** A human label change wins, and the rating comment records who changed it (from the timeline).
-- **Stability:** issues are rated once. Re-rating happens only on an explicit `--rerate --rubric <v>`.
+- **R-5 · The label `pts:N` is the source of truth** (`pts:unrated` when unrated). It's portable across orgs and boards, and its change history (who, when) comes free from the issue timeline.
+- **R-6 · Rating comment:** one comment per rating, carrying the points, a one-line rationale, and the rubric version, reference-set version and model. The markers are machine-readable, so re-rating and calibration can find it.
+- **R-7 · Board mirror, one way.** A **Points** number field on rollup #4 and on each product board the card is on, set from the label (never the reverse), over Projects v2 REST. Drift is reset from the label and reported. **Override on the label, not the field.** A human label change wins, and the actor is recorded from the timeline.
+- **R-8 · Stability.** An issue is rated once. It's re-rated only on an explicit request naming a new rubric version.
 
-### 7.3 `filing-cards` changes
+### 7.3 Filing (decisions)
 
-- `file_card.py --rate` calls `rate_card.py` after the body is final. **Filing never blocks on the rater:** a rater failure gives `pts:unrated` / `rater-error`, flagged in the read-back row.
-- `file_card.py --requested-by <login>` writes `**Requested by:** <login>` (no `@`, so nobody is pinged) into the header line next to `**Route:**`, and mirrors it to a **Requester** text board field. It defaults to the local `gh api user` login.
-- **Console Ask** passes the signed-in member's GitHub login. When it has none, the card is still filed and attribution falls back to the author (§2).
-- The read-back row gains `pts` and `requested by` columns. The delegation section of `SKILL.md` says to pass the requester through.
+- **R-9 · Rating at filing.** Filing a card rates it once the body is final. **Filing never blocks on the rater:** a failure files the card as `pts:unrated` / `rater-error` and flags it in the read-back row.
+- **R-10 · Requester.** Filing records the requester as a `**Requested by:** <login>` line in the card header, next to `**Route:**` (no `@`, so nobody is pinged). It's mirrored one way to a **Requester** text board field.
+  - It defaults to the filing machine's GitHub login.
+  - A delegated filer passes the requester through.
+  - **Console Ask** passes the signed-in member's GitHub login. When Ask has none, the card is still filed and consumers fall back to the author (§2).
+- **R-11 · Read-back.** The filing read-back row shows `pts` and `requested by`.
 
-### 7.4 Backfill
+### 7.4 Backfill (decisions)
 
-`rate_cards.py --repo <r> --state all --missing-only [--dry-run]`:
-- rates issues without `pts:`, using the original body;
-- sets `Requested by:` from the author where it's missing (recorded as `backfill`);
-- mirrors fields.
-
-It obeys the §5.2 quota floor and resumes from a checkpoint.
+- **R-12 · Backfill.** Existing issues without `pts:` are rated from their original body.
+  - Missing `Requested by:` lines are set from the author and recorded as a backfill.
+  - Board fields are mirrored.
+  - It supports a dry run, resumes after interruption, and obeys the §5.2 quota floor.
 
 ### 7.5 Calibration
 
@@ -251,19 +249,14 @@ TDD, the same style as the existing suite (stdlib, pytest, fixtures).
   - `since` watermark paging stops at the watermark.
   - **Quota floor:** a stubbed low `x-ratelimit-remaining` stops the fetch with cache and watermark intact.
   - GraphQL is used only for the two listed cases.
-- **Rating skill:**
-  - Reference-set anchors rate exactly; held-out cards land within one step.
-  - Thin body → `pts:unrated` with a reason.
-  - `file_card.py --rate --dry-run` rater-error path doesn't block filing.
-  - Backfill reads the original body when the fixture has later edits.
-  - Reconcile is one-way.
+- **Rating skill:** verification is set per card in the factory plan (handoff). Its done-when covers: anchors rate exactly and held-out cards within one step; thin body → unrated with a reason; a rater failure doesn't block filing; backfill uses the original body; mirroring is one-way.
 - **End to end:** a fixture team bucket with two humans plus the factory, and a fixture outcome cache. `/api/data` returns the Efficiency, Outcomes and Team payloads; with no config, the payload equals today's.
 - **Performance:** `/api/data` under 5 s with a warm outcome cache (a regression test using a budget on fixture scale, plus a manual check against real data).
 
 ## 11. Build order
 
 1. **token-burn A:** usage records + Efficiency section (no GitHub).
-2. **factory:** `rating-cards` + `filing-cards` `--rate` / `--requested-by` (filed as factory cards via `filing-cards`), then the backfill run.
+2. **factory:** rating at filing + requester (R-1…R-11), then the backfill run (R-12). Planned and filed by the Synkhos session (handoff).
 3. **token-burn B/C:** GitHub client with quota floor, outcome cache, joins, Outcomes section.
 4. **token-burn team mode:** actor config, bucket upload, designated fetcher, Team section.
 5. **Synkhos ops dashboard:** per §9, planned by the Synkhos session.
