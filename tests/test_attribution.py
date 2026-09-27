@@ -320,3 +320,9 @@ def test_build_join_issue_rollup_present_even_with_zero_usage():
     result = build_join([], issues=[issue()], prs=[pr()], as_of="2026-09-15")
     assert result["issue_rollups"][("o/r", 10)]["attributed_usd"] == 0.0
     assert result["issue_rollups"][("o/r", 10)]["shipped"] is True
+
+
+def test_pr_issue_number_branch_fallback_accepts_the_create_branch_from_issue_form_I9():
+    from attribution import pr_issue_number
+    assert pr_issue_number({"repo": "o/r", "number": 1, "head_ref": "hotfix/9-x", "closes": []}) == 9
+    assert pr_issue_number({"repo": "o/r", "number": 1, "head_ref": "9-x", "closes": []}) == 9

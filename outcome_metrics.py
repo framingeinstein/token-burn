@@ -324,7 +324,7 @@ def me_pr_population(prs, me_keys, me_login):
     """Controller ruling R10a (fix round 1 addendum): the local user's PR
     population for `durable_merge_rate` -- PRs `me_login` authored, UNION PRs
     linked (T4's `pr_issue_number`: `closes[]`, falling back to the
-    `feat/<n>-` branch pattern) to an issue in `me_keys` (the `me_issue_
+    issue-branch pattern) to an issue in `me_keys` (the `me_issue_
     population` result). Without this, a teammate's reverted PR that never
     touches any of "Me"'s issues would still drag down a personal
     durable-merge rate just because it exists in the same outcome cache.

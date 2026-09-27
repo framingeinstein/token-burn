@@ -11,6 +11,7 @@ from outcomes import (
     build_issue_record,
     build_pr_record,
     cache_paths,
+    closes_from_body,
     closes_from_branch,
     closes_from_timeline,
     fetch_outcomes,
@@ -107,19 +108,63 @@ def test_approved_by_none_when_absent():
     assert approved_by_from_timeline([{"event": "labeled", "label": {"name": "pts:3"}}]) is None
 
 
-def test_closes_from_timeline_connected_and_cross_referenced():
+def test_closes_from_timeline_uses_connected_events_only_I9():
+    # `cross-referenced` on a PR's timeline means "some issue/PR MENTIONED this
+    # PR" -- the wrong side for "which issues does this PR close" (final review
+    # I9: 11/15 cached PRs mismatched on live data). Only `connected` counts.
     events = [
         {"event": "connected", "source": {"issue": {"number": 12}}},
         {"event": "cross-referenced", "source": {"issue": {"number": 8}}},
         {"event": "cross-referenced", "source": {"issue": {"number": 99, "pull_request": {}}}},
     ]
-    assert closes_from_timeline(events) == [8, 12]
+    assert closes_from_timeline(events) == [12]
 
 
 def test_closes_from_branch_pattern():
     assert closes_from_branch("feat/123-do-the-thing") == [123]
     assert closes_from_branch("main") == []
     assert closes_from_branch(None) == []
+
+
+def test_closes_from_branch_accepts_githubs_create_branch_from_issue_forms_I9():
+    assert closes_from_branch("171-fix-the-thing") == [171]       # GitHub's default
+    assert closes_from_branch("hotfix/171-x") == [171]
+    assert closes_from_branch("fix.it_now/9-y") == [9]
+    assert closes_from_branch("revert-20-x") == []
+    assert closes_from_branch("a/b/171-x") == []                   # one prefix segment only
+    assert closes_from_branch("feat/x-171") == []
+
+
+def test_closes_from_body_reads_closing_keywords_for_same_repo_refs_only_I9():
+    body = ("Closes #12, fixes o/r#13 and Resolved: #14.\n"
+            "Also fixes other/repo#15; mentions #16; see abc#17\n"
+            "FIX #18 / close #19 / resolves #20 / fixed #21 / closed #22 / resolve #23")
+    assert closes_from_body(body, "o/r") == [12, 13, 14, 18, 19, 20, 21, 22, 23]
+    assert closes_from_body(None, "o/r") == []
+    assert closes_from_body("prefix#12 closes#13 unfixes #14", "o/r") == []
+
+
+def test_resolve_pr_closes_uses_the_body_before_the_branch_and_graphql_I9():
+    called = {"graphql": False}
+    def fake_graphql(*a, **kw):
+        called["graphql"] = True
+        return [999]
+    result = resolve_pr_closes("o/r", 1, "feat/7-x", [], "tok", Quota(), object(),
+                               graphql=fake_graphql, body="Fixes #30")
+    assert result == [30]
+    assert called["graphql"] is False
+    # no keyword in the body -> the branch pattern (GitHub's create-branch form)
+    result = resolve_pr_closes("o/r", 1, "7-x", [], "tok", Quota(), object(),
+                               graphql=fake_graphql, body="just a mention of #30")
+    assert result == [7]
+    assert called["graphql"] is False
+
+
+def test_resolve_pr_closes_ignores_a_cross_reference_mention_I9():
+    events = [{"event": "cross-referenced", "source": {"issue": {"number": 7763}}}]
+    result = resolve_pr_closes("o/r", 191, "feat/5-x", events, "tok", Quota(), object(),
+                               graphql=lambda *a, **k: [999], body="")
+    assert result == [5]
 
 
 def test_review_rounds_counts_reviewed_events():
@@ -595,3 +640,23 @@ def test_issue_etag_is_saved_after_a_complete_listing(tmp_path):
                    transport=ScriptedTransport(script))
     state = read_state(cache_paths(tmp_path)["state"])
     assert state["repos"]["synkhos/a"]["issues"]["etag"] == '"new"'
+
+
+def test_fetch_resolves_closes_from_the_pr_body_and_never_stores_it_I9(tmp_path):
+    script = {
+        ("GET", "/orgs/synkhos/repos"): [(200, rl(5000), [{"full_name": "synkhos/a"}])],
+        ("GET", "/repos/synkhos/a/issues"): [(304, rl(5000), None)],
+        ("GET", "/repos/synkhos/a/pulls"): [(200, rl(5000), [
+            dict(_pr_item(2, "2026-09-02T00:00:00Z"), head={"ref": "chore/cleanup"},
+                 title="Tidy up", body="Some secret-ish prose.\n\nCloses #7")])],
+        ("GET", "/repos/synkhos/a/issues/2/timeline"): [(200, rl(5000), [
+            {"event": "cross-referenced", "source": {"issue": {"number": 7763}}}])],
+    }
+    transport = ScriptedTransport(script)
+    report = fetch_outcomes(cache_dir=tmp_path, owners=["synkhos"], token="tok",
+                            transport=transport)
+    assert report["calls"]["graphql"] == 0
+    raw = cache_paths(tmp_path)["prs"].read_text()
+    rec = json.loads(raw.strip())
+    assert rec["closes"] == [7]
+    assert "secret-ish" not in raw and "body" not in rec

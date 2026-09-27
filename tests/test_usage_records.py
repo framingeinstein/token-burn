@@ -625,3 +625,11 @@ def test_run_usage_resolves_each_cwd_once_and_persists_the_map(tmp_path):
     run_usage(root, "UTC", usage_dir, "human:x", PRICES, today="2026-09-26", run=run)
     assert len([c for c in calls if "remote" in c]) == 1
     assert json.loads((usage_dir / "repo-cache.json").read_text()) == {str(d): "o/r"}
+
+
+def test_issue_from_branch_accepts_githubs_create_branch_from_issue_forms_I9():
+    assert issue_from_branch("feat/171-x") == 171
+    assert issue_from_branch("171-x") == 171
+    assert issue_from_branch("hotfix/171-x") == 171
+    assert issue_from_branch("a/b/171-x") is None
+    assert issue_from_branch("revert-20-x") is None

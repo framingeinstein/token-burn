@@ -17,6 +17,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from usage_records import ISSUE_BRANCH_RE
 from github_client import (
     GitHubError,
     GitHubUnreachable,
@@ -37,7 +38,12 @@ DEFAULT_CACHE_DIR = Path("~/.token-burn/outcomes").expanduser()
 DEFAULT_OWNERS = ("synkhos", "FramingEinsteinInc", "framingeinstein")
 
 _PTS_LABEL_RE = re.compile(r"^pts:(unrated|\d+)$")
-_ISSUE_BRANCH_RE = re.compile(r"^feat/(\d+)-")
+_ISSUE_BRANCH_RE = ISSUE_BRANCH_RE   # one rule everywhere (final review I9)
+# GitHub's closing keywords, then a same-repo issue ref: `#12` or `owner/repo#12`.
+_CLOSING_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+"
+    r"(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(\d+)\b",
+    re.IGNORECASE)
 _REQUESTED_BY_RE = re.compile(r"^\*\*Requested by:\*\*\s*([A-Za-z0-9-]{1,39})\s*$", re.MULTILINE)
 _REVERT_TITLE_RE = re.compile(r'^Revert "')
 _PR_NUMBER_REF_RE = re.compile(r"#(\d+)")
@@ -172,11 +178,13 @@ def review_rounds_from_timeline(events):
 
 
 def closes_from_timeline(events):
-    """Issue numbers a PR closes, from `connected` / `cross-referenced` timeline
-    events (spec Sec5.2 row 5, REST first attempt)."""
+    """Issue numbers a PR closes, from `connected` timeline events (spec
+    Sec5.2 row 5, REST first attempt). NOT `cross-referenced` (final review
+    I9): on a PR's timeline that event means some other issue/PR MENTIONED
+    this PR -- the wrong side of the link, not a closing reference."""
     closes = set()
     for ev in events:
-        if ev.get("event") not in ("connected", "cross-referenced"):
+        if ev.get("event") != "connected":
             continue
         src = (ev.get("source") or {}).get("issue") or {}
         if src.get("number") and "pull_request" not in src:
@@ -207,18 +215,38 @@ def revert_target(title, body, events):
     return None
 
 
+def closes_from_body(body, repo):
+    """Issue numbers a PR's body closes with a GitHub closing keyword
+    (close/closes/closed/fix/fixes/fixed/resolve/resolves/resolved, optional
+    colon) followed by a SAME-repo ref -- `#N` or `<repo>#N`; a ref to another
+    repo is ignored (final review I9). The body is read in memory only, never
+    stored (same convention as `requested_by_and_source`/`revert_target`)."""
+    closes = set()
+    for m in _CLOSING_REF_RE.finditer(body or ""):
+        ref_repo, number = m.group(1), m.group(2)
+        if ref_repo and ref_repo.lower() != (repo or "").lower():
+            continue
+        closes.add(int(number))
+    return sorted(closes)
+
+
 def closes_from_branch(head_ref):
-    """`feat/<n>-...` branch pattern fallback (spec Sec5.2 row 5, REST second
-    attempt)."""
+    """Issue-branch pattern fallback (`feat/<n>-`, `<n>-`, `<prefix>/<n>-` --
+    `usage_records.ISSUE_BRANCH_RE`; spec Sec5.2 row 5, REST second attempt)."""
     m = _ISSUE_BRANCH_RE.match(head_ref or "")
     return [int(m.group(1))] if m else []
 
 
 def resolve_pr_closes(repo, pr_number, head_ref, events, token, quota, transport,
-                       graphql=graphql_closing_issues):
-    """REST first (timeline, then branch pattern); GraphQL only when both
-    resolve nothing (spec Sec5.2 row 5 -- the one PR-side named GraphQL case)."""
+                       graphql=graphql_closing_issues, body=None):
+    """REST first -- `connected` timeline events, then closing keywords in the
+    PR body (read in memory, never stored), then the issue-branch pattern;
+    GraphQL only when all of those resolve nothing (spec Sec5.2 row 5 -- the
+    one PR-side named GraphQL case; final review I9)."""
     closes = closes_from_timeline(events)
+    if closes:
+        return closes
+    closes = closes_from_body(body, repo)
     if closes:
         return closes
     closes = closes_from_branch(head_ref)
@@ -348,7 +376,7 @@ def _process_prs(repo, repo_state, token, quota, transport, paths, report):
             events = issue_timeline(repo, pr["number"], token, quota, transport)
             closes = resolve_pr_closes(
                 repo, pr["number"], (pr.get("head") or {}).get("ref"),
-                events, token, quota, transport)
+                events, token, quota, transport, body=pr.get("body"))
             append_jsonl(paths["prs"], build_pr_record(repo, pr, events, closes))
             report["prs"] += 1
             processed.append(pr.get("updated_at"))

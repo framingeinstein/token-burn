@@ -17,8 +17,8 @@ pattern-constrained identifier — so a record is safe to leave the machine
   (no network), cached per cwd in a `RepoCache` that persists non-null
   results to `<usage_dir>/repo-cache.json` -- so a worktree's remote captured
   while it existed still resolves after the worktree is deleted. A cwd with no
-  git remote yields `repo: null`, never an error. `issue` comes from a
-  `feat/<n>-...` branch, or from the factory bucket path via a runner -> repo
+  git remote yields `repo: null`, never an error. `issue` comes from an
+  issue branch (`feat/<n>-...`, `<n>-...`, `<prefix>/<n>-...`), or from the factory bucket path via a runner -> repo
   map (plan decision #5).
 - `on_behalf_of`/`requester_source` (the requester slot) are always null here;
   T4 fills them in from the issue.
@@ -54,7 +54,12 @@ _CTX_BUCKETS = (("1", 1, 1), ("2-5", 2, 5), ("6-20", 6, 20), ("21-50", 21, 50), 
 _KEY_FIELDS = ("day", "actor", "on_behalf_of", "repo", "branch", "issue", "session",
               "model_class", "kind")
 
-_ISSUE_BRANCH_RE = re.compile(r"^feat/(\d+)-")
+# The issue-branch rule, shared by usage_records.issue_from_branch,
+# outcomes.closes_from_branch and (through it) attribution: `feat/171-x`, and
+# GitHub's "create a branch for this issue" form `171-x`, with at most one
+# prefix segment (`hotfix/171-x`). Final review I9 controller ruling.
+ISSUE_BRANCH_RE = re.compile(r"^(?:[A-Za-z0-9._-]+/)?(\d+)-")
+_ISSUE_BRANCH_RE = ISSUE_BRANCH_RE
 
 # Same shape as the schema's `branch` pattern (schemas/usage-record.schema.json) —
 # duplicated here (not loaded from the file) so it stays a fast, dependency-free
@@ -198,7 +203,8 @@ def resolve_branch(cwd, run=subprocess.run):
 
 
 def issue_from_branch(branch):
-    """Issue number from a `feat/<n>-...` branch, else None."""
+    """Issue number from an issue branch (`feat/<n>-...`, `<n>-...`,
+    `<prefix>/<n>-...` -- `ISSUE_BRANCH_RE`), else None."""
     if not branch:
         return None
     m = _ISSUE_BRANCH_RE.match(branch)

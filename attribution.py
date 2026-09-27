@@ -11,8 +11,8 @@ Join chain (spec Sec5.3):
    Branches `main`, `master`, `HEAD` and `null` never join (spec, verbatim).
 2. PR -> issue by `pr.closes[]` (the lowest issue number when a PR closes
    several -- not spec-fixed, a T4 choice so each record still resolves to
-   exactly ONE issue for $ conservation), falling back to the `feat/<n>-`
-   pattern on the PR's own branch.
+   exactly ONE issue for $ conservation), falling back to the issue-branch
+   pattern (`feat/<n>-`, `<n>-`, `<prefix>/<n>-`) on the PR's own branch.
 3. Factory record -> issue directly from the record's own `issue` field (the
    bucket-path issue T1 already resolved) -- this is factory-only; a local
    session with an `issue` field but no matching PR stays unattributed rather
@@ -92,7 +92,8 @@ def select_pr_for_branch(candidates):
 
 def pr_issue_number(pr):
     """The issue this PR joins to (spec Sec5.3 rule 2): the lowest number in
-    `closes[]`, falling back to the `feat/<n>-` pattern on the PR's own
+    `closes[]`, falling back to the issue-branch pattern (`feat/<n>-`,
+    `<n>-`, `<prefix>/<n>-`) on the PR's own
     `head_ref` (`outcomes.closes_from_branch`, the same pattern T3 uses as its
     own REST-fallback). `None` when neither resolves."""
     closes = pr.get("closes") or []
