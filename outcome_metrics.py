@@ -26,6 +26,17 @@ below is computed over the SCOPED population; `shipped`/`durable` verdicts
 (properties of the issue/PR themselves, not of who paid) still come from the
 full T4 join across every known issue and PR.
 
+Controller ruling R10 (fix round 1): scoping dollars isn't enough -- WHICH
+issues are in scope for "Me" is a separate question (`me_issue_population`).
+Without it, a teammate's issue that happens to be `shipped`/`rated`/
+`not_planned` in the same outcome cache would still surface in every
+issue-level list (with `$0` from me diluting $/pt, polluting the Spearman
+population, and showing up in the dead-end list) even though `scope_to_me`
+correctly zeroed its dollars. `build_outcomes_payload` restricts
+`issue_rollups` (and everything derived from it: shipped rows, $/pt,
+per-repo table, points shipped, validity, autonomy, model fit, dead-end
+list) to `me_issue_population`'s key set before computing anything.
+
 Ruling R5: `pts:` labels don't exist yet on live issues (the factory rater,
 synkhos/factory#166, isn't built) -- $/pt coverage on real data will be near
 0%, honestly reported via `coverage()`, never fabricated or hidden as an
@@ -154,6 +165,39 @@ def actor_login(actor):
     if not actor:
         return None
     return actor.split(":", 1)[1] if ":" in actor else actor
+
+
+def me_issue_population(issues, scoped_attrs, me_login):
+    """Controller ruling R10 (fix round 1): the local user's ISSUE population --
+    not just their dollars. An issue belongs to "Me" when its resolved
+    requester (`requested_by`, falling back to the issue `author` as a
+    defensive belt-and-braces check -- `outcomes.requested_by_and_source`
+    already applies this same fallback at fetch time, so `requested_by`
+    should never actually be `None` here) is `me_login`, UNION any issue the
+    user's own `scope_to_me`-filtered records attribute ANY $ to (e.g.
+    hands-on review/fixup work on a teammate's branch, with no `requested_by`
+    match). Every issue-level metric and list in `build_outcomes_payload`
+    (shipped rows, $/pt + its coverage, the per-repo table, points
+    shipped/throughput, validity rho, autonomy, model fit, the dead-end list)
+    is restricted to this population -- a teammate's shipped/rated/not_planned
+    issue must never surface just because it happens to exist in the same
+    outcome cache.
+
+    Pure and exported, and scoping is a PARAMETER (`me_login`/`scoped_attrs`),
+    never baked in: the Synkhos factory snapshot job needs the unscoped/team
+    population too, which it gets by passing `me_login=None` (no requester
+    filter) with every attribution (no record scoping) rather than a
+    different code path."""
+    keys = set()
+    if me_login:
+        for issue in issues:
+            requester = issue.get("requested_by") or issue.get("author")
+            if requester == me_login:
+                keys.add((issue["repo"], issue["number"]))
+    for attr in scoped_attrs:
+        if attr.get("issue"):
+            keys.add(attr["issue"])
+    return keys
 
 
 def scope_to_me(records, attributions, me_login):
@@ -450,14 +494,21 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login
 
     # shipped/durable are facts about the issue/PR itself (spec Sec3C/Sec3B),
     # so they come from T4's join over the FULL population; dollar amounts are
-    # rebuilt over the scoped population only (Amendment A-3).
+    # rebuilt over the scoped population only (Amendment A-3). Ruling R10:
+    # WHICH issues are in scope is a separate question from their dollars --
+    # `me_keys` below restricts every issue-level metric/list to "Me"'s own
+    # population, not just the $ that flow through it.
     joined = build_join(records, issues, prs, as_of=as_of)
     issue_rollups = _rescope_issue_dollars(joined["issue_rollups"], scoped_records, scoped_attrs)
     pr_rollups = joined["pr_rollups"]
 
-    rows = shipped_issue_rows(issue_rollups, issues)
+    me_keys = me_issue_population(issues, scoped_attrs, me_login)
+    issue_rollups = {key: row for key, row in issue_rollups.items() if key in me_keys}
+    scoped_issues = [i for i in issues if (i["repo"], i["number"]) in me_keys]
+
+    rows = shipped_issue_rows(issue_rollups, scoped_issues)
     stale = stale_branches(scoped_records, prs, as_of)
-    dead_end = dead_end_payload(issue_rollups, not_planned_issues(issues), scoped_records, stale)
+    dead_end = dead_end_payload(issue_rollups, not_planned_issues(scoped_issues), scoped_records, stale)
 
     tiles = {
         "points_shipped_this_week": points_shipped_this_week(rows, as_of),
@@ -473,6 +524,6 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login
         "per_repo": per_repo_table(rows, as_of=as_of),
         "autonomy_trend": autonomy_trend(scoped_records, scoped_attrs, rows),
         "dead_end_list": dead_end["top"],
-        "model_fit": model_fit_candidates(scoped_records, scoped_attrs, issues),
+        "model_fit": model_fit_candidates(scoped_records, scoped_attrs, scoped_issues),
         "unattributed": unattributed_summary(scoped_records, scoped_attrs),
     }

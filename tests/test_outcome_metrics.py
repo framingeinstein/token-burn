@@ -15,6 +15,7 @@ from outcome_metrics import (
     dead_end_payload,
     durable_merge_rate,
     iso_week,
+    me_issue_population,
     median,
     model_fit_candidates,
     p90,
@@ -404,6 +405,39 @@ def test_scope_to_me_no_login_drops_all_factory_records():
     assert scoped_r[0]["kind"] == "interactive"
 
 
+# --- me_issue_population: WHICH issues are in scope, not just their $ (ruling R10) -------
+
+def test_me_issue_population_includes_issues_i_requested():
+    issues = [issue(number=10, requested_by="jason"), issue(number=11, requested_by="ricky")]
+    keys = me_issue_population(issues, scoped_attrs=[], me_login="jason")
+    assert keys == {("o/r", 10)}
+
+
+def test_me_issue_population_falls_back_to_author_when_no_requested_by():
+    issues = [issue(number=10, requested_by=None, author="jason")]
+    keys = me_issue_population(issues, scoped_attrs=[], me_login="jason")
+    assert keys == {("o/r", 10)}
+
+
+def test_me_issue_population_unions_in_issues_my_scoped_records_attribute_to():
+    issues = [issue(number=11, requested_by="ricky")]  # not mine by requester...
+    scoped_attrs = [{"attributed": True, "issue": ("o/r", 11), "requester": "ricky"}]  # ...but I have $ logged on it
+    keys = me_issue_population(issues, scoped_attrs, me_login="jason")
+    assert keys == {("o/r", 11)}
+
+
+def test_me_issue_population_excludes_a_teammates_untouched_issue():
+    issues = [issue(number=11, requested_by="ricky")]
+    keys = me_issue_population(issues, scoped_attrs=[], me_login="jason")
+    assert keys == set()
+
+
+def test_me_issue_population_no_login_is_union_only():
+    issues = [issue(number=10, requested_by="jason")]
+    keys = me_issue_population(issues, scoped_attrs=[], me_login=None)
+    assert keys == set()
+
+
 # --- build_outcomes_payload: full assembly, rescoped dollars, honest coverage ------------
 
 def test_build_outcomes_payload_rescopes_dollars_to_me():
@@ -426,6 +460,60 @@ def test_build_outcomes_payload_rescopes_dollars_to_me():
     # $/pt median over rated rows: issue 10 -> 3.0/2 = 1.5 ; issue 11 excluded entirely
     assert per_repo["cost_per_point"]["median"] == pytest.approx(1.5)
     assert per_repo["cost_per_point"]["coverage"]["total"] == 1  # only issue 10 shipped+scoped
+
+
+def test_build_outcomes_payload_excludes_a_teammates_shipped_rated_issue_R10():
+    # Controller ruling R10 regression (fix round 1) -- exact reviewer repro:
+    # my shipped/rated issue (#10) + a teammate's SHIPPED/rated issue (#11,
+    # $0 from me) + a teammate's not_planned issue (#12). Before the fix,
+    # `shipped_issue_rows` pulled #11's pts into the per-repo ratio/coverage/
+    # validity pool and #12 into the dead-end list just because `scope_to_me`
+    # zeroed (rather than removed) their dollars -- the issue itself still
+    # flowed through unscoped.
+    records = [
+        usage_record(actor="human:jason", kind="interactive", branch="feat/10-x",
+                     repo="o/r", cost_usd=1.0),
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None,
+                     issue=10, repo="o/r", cost_usd=2.0),
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None,
+                     issue=11, repo="o/r", cost_usd=50.0),  # ricky's factory spend, not mine
+    ]
+    issues = [
+        issue(number=10, pts=2, requested_by="jason", closed_at="2026-09-14T00:00:00Z"),
+        issue(number=11, pts=5, requested_by="ricky", closed_at="2026-09-14T00:00:00Z"),
+        issue(number=12, pts=8, requested_by="ricky", state_reason="not_planned", closed_at=None),
+    ]
+    prs = [
+        pr(number=20, closes=[10], head_ref="feat/10-x"),
+        pr(number=21, closes=[11], head_ref="feat/11-x"),
+    ]
+    payload = build_outcomes_payload(records, issues, prs, as_of="2026-09-15",
+                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+
+    per_repo = payload["per_repo"][0]
+    assert per_repo["cost_per_point"]["median"] == pytest.approx(1.5)   # only #10: $3 / 2pts
+    assert per_repo["cost_per_point"]["coverage"] == {"counted": 1, "total": 1, "pct": 100.0}
+    assert per_repo["validity"]["n"] == 1                                # #11 excluded entirely, not just unrated
+
+    assert payload["tiles"]["points_shipped_this_week"]["points"] == 2  # not 2 + 5
+
+    dead_end_keys = {(d["repo"], d.get("number")) for d in payload["dead_end_list"]}
+    assert ("o/r", 12) not in dead_end_keys                              # ricky's not_planned issue excluded
+
+
+def test_build_outcomes_payload_includes_an_issue_i_requested_even_with_zero_dollars_so_far():
+    # Union clause 1 of ruling R10: an issue I requested belongs to "Me" even
+    # when none of my (scoped) usage records have attributed anything to it
+    # yet (e.g. the factory transcript for the commissioning session hasn't
+    # been mirrored locally) -- inclusion must not depend on $ > 0.
+    issues = [issue(number=13, pts=3, requested_by="jason", closed_at="2026-09-14T00:00:00Z")]
+    prs = [pr(number=23, closes=[13], head_ref="feat/13-x")]
+    payload = build_outcomes_payload([], issues, prs, as_of="2026-09-15",
+                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+    per_repo = payload["per_repo"][0]
+    assert per_repo["points_shipped"] == 3
+    assert per_repo["cost_per_point"]["coverage"] == {"counted": 1, "total": 1, "pct": 100.0}
+    assert per_repo["cost_per_point"]["median"] == 0.0  # $0 attributed so far, still counted (not excluded)
 
 
 def test_build_outcomes_payload_shape_has_all_sections():
