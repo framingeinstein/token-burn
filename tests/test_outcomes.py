@@ -22,6 +22,7 @@ from outcomes import (
     resolve_pr_closes,
     reopened_at_from_timeline,
     review_rounds_from_timeline,
+    revert_target,
     write_state,
 )
 
@@ -181,8 +182,54 @@ def test_build_pr_record_shape():
     assert rec == {
         "repo": "o/r", "number": 20, "author": "jason", "head_ref": "feat/10-x",
         "state": "merged", "merged_at": "2026-09-02T00:00:00Z", "closes": [10],
-        "reverted_by": None, "review_rounds": 2,
+        "reverted_by": None, "reverts": None, "review_rounds": 2,
     }
+
+
+# --- revert detection (T4 / controller ruling R7): title is the marker,
+# body-or-timeline supplies the original PR number; only the number is ever
+# stored -- never title/body text --------------------------------------------
+
+def test_revert_target_from_body_reference():
+    title = 'Revert "Add dark mode"'
+    body = "This reverts pull request #35 from o/feat-branch."
+    assert revert_target(title, body, []) == 35
+
+
+def test_revert_target_from_timeline_when_body_has_no_reference():
+    title = 'Revert "Add dark mode"'
+    events = [{"event": "cross-referenced",
+               "source": {"issue": {"number": 35, "pull_request": {}}}}]
+    assert revert_target(title, "This reverts a commit.", events) == 35
+
+
+def test_revert_target_none_when_title_is_not_a_revert():
+    assert revert_target("Add dark mode", "This reverts pull request #35.", []) is None
+
+
+def test_revert_target_none_when_revert_title_has_no_resolvable_reference():
+    # title alone is not enough (controller ruling R7): body/timeline must
+    # actually name the original PR, or this isn't a *confirmed* revert.
+    title = 'Revert "Add dark mode"'
+    assert revert_target(title, "This reverts a commit.", []) is None
+
+
+def test_revert_target_ignores_issue_references_in_timeline():
+    # a cross-referenced issue (not a PR) never counts as the reverted target
+    title = 'Revert "Add dark mode"'
+    events = [{"event": "cross-referenced", "source": {"issue": {"number": 35}}}]
+    assert revert_target(title, "This reverts a commit.", events) is None
+
+
+def test_build_pr_record_sets_reverts_from_title_and_body():
+    pr = {"number": 21, "user": {"login": "jason"}, "head": {"ref": "revert-10-x"},
+          "state": "closed", "merged_at": "2026-09-03T00:00:00Z",
+          "title": 'Revert "Add dark mode"',
+          "body": "This reverts pull request #10 from o/r."}
+    rec = build_pr_record("o/r", pr, [], closes=[])
+    assert rec["reverts"] == 10
+    # never leaks title/body text into the stored record
+    assert "title" not in rec and "body" not in rec
 
 
 # --- cache: JSONL latest-line-wins + state -----------------------------

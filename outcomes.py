@@ -39,6 +39,8 @@ DEFAULT_OWNERS = ("synkhos", "FramingEinsteinInc", "framingeinstein")
 _PTS_LABEL_RE = re.compile(r"^pts:(unrated|\d+)$")
 _ISSUE_BRANCH_RE = re.compile(r"^feat/(\d+)-")
 _REQUESTED_BY_RE = re.compile(r"^\*\*Requested by:\*\*\s*([A-Za-z0-9-]{1,39})\s*$", re.MULTILINE)
+_REVERT_TITLE_RE = re.compile(r'^Revert "')
+_PR_NUMBER_REF_RE = re.compile(r"#(\d+)")
 
 
 # --- cache: JSONL latest-line-wins + state.json (watermarks/ETags) ---------
@@ -182,6 +184,29 @@ def closes_from_timeline(events):
     return sorted(closes)
 
 
+def revert_target(title, body, events):
+    """The PR number this PR reverts, or `None` (spec Sec3B / controller
+    ruling R7). Confirmed only when the title starts with `Revert "` (the
+    marker GitHub's own auto-generated revert title always carries) AND the
+    body or timeline actually names the original PR -- the title alone isn't
+    enough, since it never carries the number itself. Only the number is ever
+    returned; the title/body text stops here and is never stored (`body`
+    read only long enough to search it, same convention as
+    `requested_by_and_source`)."""
+    if not title or not _REVERT_TITLE_RE.match(title):
+        return None
+    m = _PR_NUMBER_REF_RE.search(body or "")
+    if m:
+        return int(m.group(1))
+    for ev in events:
+        if ev.get("event") not in ("connected", "cross-referenced"):
+            continue
+        src = (ev.get("source") or {}).get("issue") or {}
+        if src.get("number") and "pull_request" in src:
+            return src["number"]
+    return None
+
+
 def closes_from_branch(head_ref):
     """`feat/<n>-...` branch pattern fallback (spec Sec5.2 row 5, REST second
     attempt)."""
@@ -227,8 +252,11 @@ def build_issue_record(repo, issue, events):
 
 def build_pr_record(repo, pr, events, closes):
     """The Sec4.2 PR record. `reverted_by` is always null here -- T4 computes
-    reverts. `state` is "merged" when `merged_at` is set (more informative
-    than GitHub's raw "closed" for a merged PR), else GitHub's own state."""
+    it by inverting `reverts` among merged PRs. `reverts` (T4 / R7) is derived
+    here at fetch time from the PR's own title/body/timeline, but only the
+    target PR NUMBER is stored -- never the title or body text. `state` is
+    "merged" when `merged_at` is set (more informative than GitHub's raw
+    "closed" for a merged PR), else GitHub's own state."""
     return {
         "repo": repo,
         "number": pr["number"],
@@ -238,6 +266,7 @@ def build_pr_record(repo, pr, events, closes):
         "merged_at": pr.get("merged_at"),
         "closes": closes,
         "reverted_by": None,
+        "reverts": revert_target(pr.get("title"), pr.get("body"), events),
         "review_rounds": review_rounds_from_timeline(events),
     }
 
