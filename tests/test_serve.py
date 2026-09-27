@@ -16,6 +16,21 @@ from serve import (
 )
 from team_upload import write_upload_state
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _never_read_the_real_team_config(monkeypatch):
+    """Hermetic (final review): no test here may read the real env or
+    ~/.token-burn/team.json -- tests pass `team_config` explicitly."""
+    import serve
+
+    def boom(*a, **k):
+        raise AssertionError("test read the real team config; pass cfg['team_config']")
+
+    monkeypatch.setattr(serve, "load_team_config", boom)
+
+
 def test_choose_port_returns_start_when_free():
     assert choose_port(8799, 20, is_free=lambda p: True) == 8799
 
@@ -31,7 +46,8 @@ def test_build_payload_assembles_from_ledger_and_logs(tmp_path):
     cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": fixtures,
            "tz": "UTC", "today": "2026-05-21",
            "cursor_db": str(tmp_path / "missing.vscdb"),
-           "cursor_ledger": str(tmp_path / "missing.jsonl")}
+           "cursor_ledger": str(tmp_path / "missing.jsonl"),
+           "team_config": {}}
     payload = build_payload(cfg)
     assert "meta" in payload and "days" in payload
     assert payload["days"][0]["date"] == "2026-05-21"
@@ -56,6 +72,12 @@ def test_build_payload_assembles_from_ledger_and_logs(tmp_path):
 # --- Team upload: reads the local upload-state file only; never uploads ----
 
 def test_build_team_upload_section_unconfigured_is_absent_empty():
+    assert build_team_upload_section({"team_config": {}}) == {"configured": False}
+
+
+def test_build_team_upload_section_loads_config_only_when_none_was_given(monkeypatch):
+    import serve
+    monkeypatch.setattr(serve, "load_team_config", lambda: None)
     assert build_team_upload_section({}) == {"configured": False}
 
 
@@ -133,7 +155,8 @@ def test_dashboard_and_api_disable_http_caching(tmp_path):
     cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": fixtures,
            "tz": "UTC", "today": "2026-05-21",
            "cursor_db": str(tmp_path / "missing.vscdb"),
-           "cursor_ledger": str(tmp_path / "missing.jsonl")}
+           "cursor_ledger": str(tmp_path / "missing.jsonl"),
+           "team_config": {}}
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, cfg=cfg))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -157,7 +180,8 @@ def test_build_payload_without_root_discovers_every_store(tmp_path, monkeypatch)
     cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": None,
            "tz": "UTC", "today": "2026-05-21",
            "cursor_db": str(tmp_path / "missing.vscdb"),
-           "cursor_ledger": str(tmp_path / "missing.jsonl")}
+           "cursor_ledger": str(tmp_path / "missing.jsonl"),
+           "team_config": {}}
     payload = build_payload(cfg)
     assert payload["days"][0]["date"] == "2026-05-21"
 

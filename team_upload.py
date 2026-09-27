@@ -48,6 +48,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request
 from urllib.request import urlopen as _urlopen
 
@@ -76,7 +77,9 @@ def load_team_config(env=None, config_path=DEFAULT_CONFIG_PATH):
     otherwise a gitignored local JSON file with the same two keys is tried
     (mirrors `sync-factory.sh`'s `.env.factory` / `cursor_usage.py`'s token
     file). Both fields are required -- a partial config is unconfigured, so
-    a half-set-up machine never sends a batch to the wrong place."""
+    a half-set-up machine never sends a batch to the wrong place. A door URL
+    that isn't https:// (plain http:// only to localhost) is unconfigured too
+    (`door_url_allowed`)."""
     env = os.environ if env is None else env
     door_url = env.get("TOKEN_BURN_TEAM_DOOR_URL")
     tenant = env.get("TOKEN_BURN_TEAM_TENANT")
@@ -91,7 +94,27 @@ def load_team_config(env=None, config_path=DEFAULT_CONFIG_PATH):
             tenant = tenant or data.get("tenant")
     if not door_url or not tenant:
         return None
+    if not door_url_allowed(door_url):
+        return None                  # never send a house credential over plain http
     return {"door_url": door_url, "tenant": tenant}
+
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def door_url_allowed(url):
+    """https:// only -- the request carries a house credential -- except plain
+    http:// to this machine (localhost / 127.0.0.1 / ::1), for a local stub door."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and host in _LOCAL_HOSTS
 
 
 def console_efficiency_url(env=None):

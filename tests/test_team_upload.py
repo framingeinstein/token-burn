@@ -372,3 +372,31 @@ def test_no_actor_sends_nothing(tmp_path):
     assert transport.calls == []
     assert result["sent"] == [] and "actor" in result["skipped_reason"]
     assert not state_path.exists()
+
+
+# --- final review small item: the door URL must be https (http only for localhost) --
+
+@pytest.mark.parametrize("url", [
+    "http://door.example/upload",
+    "ftp://door.example/upload",
+    "door.example/upload",
+    "http://localhost.evil.example/upload",
+])
+def test_load_team_config_refuses_a_non_https_door(tmp_path, url):
+    env = {"TOKEN_BURN_TEAM_DOOR_URL": url, "TOKEN_BURN_TEAM_TENANT": "fe"}
+    assert tu.load_team_config(env=env, config_path=tmp_path / "missing.json") is None
+    path = tmp_path / "team.json"
+    path.write_text(json.dumps({"door_url": url, "tenant": "fe"}))
+    assert tu.load_team_config(env={}, config_path=path) is None
+
+
+@pytest.mark.parametrize("url", [
+    "https://door.example/upload",
+    "http://localhost:8080/upload",
+    "http://127.0.0.1:9/upload",
+    "http://[::1]:9/upload",
+])
+def test_load_team_config_accepts_https_or_local_http(tmp_path, url):
+    env = {"TOKEN_BURN_TEAM_DOOR_URL": url, "TOKEN_BURN_TEAM_TENANT": "fe"}
+    assert tu.load_team_config(env=env, config_path=tmp_path / "missing.json") == {
+        "door_url": url, "tenant": "fe"}
