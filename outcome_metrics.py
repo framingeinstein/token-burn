@@ -16,7 +16,9 @@ is meant to import this module directly so its numbers agree with this
 dashboard's.
 
 Amendment 2026-09-27 (controller ruling R9): team data lives in the Synkhos
-console, so THIS local dashboard shows the local user's "Me" view -- their own
+console, so THIS local dashboard shows the local user's "Me" view
+(`build_outcomes_payload(..., scope=<login>)`; `scope=None` is the unscoped
+team view, final review I6) -- their own
 hands-on spend, plus factory work they commissioned (a factory record whose
 resolved requester, per `attribution.attribute_record`, is them). A factory
 record commissioned by someone else, or one whose requester can't be resolved
@@ -194,11 +196,10 @@ def me_issue_population(issues, scoped_attrs, me_login):
     issue must never surface just because it happens to exist in the same
     outcome cache.
 
-    Pure and exported, and scoping is a PARAMETER (`me_login`/`scoped_attrs`),
-    never baked in: the Synkhos factory snapshot job needs the unscoped/team
-    population too, which it gets by passing `me_login=None` (no requester
-    filter) with every attribution (no record scoping) rather than a
-    different code path."""
+    Pure and exported. Only the "Me" view calls it: the unscoped team view
+    is `build_outcomes_payload(..., scope=None)`, which skips this filter
+    entirely (final review I6) -- `me_login=None` here means "no requester
+    match", NOT "everyone"."""
     keys = set()
     if me_login:
         for issue in issues:
@@ -212,19 +213,27 @@ def me_issue_population(issues, scoped_attrs, me_login):
 
 
 def scope_to_me(records, attributions, me_login):
-    """Amendment A-3 / controller ruling R9: keep every hands-on (`interactive`)
-    record -- it's this machine's own session by construction -- plus a
-    factory record only when its resolved requester (T4's `attribute_record`)
-    is `me_login`. Everything else (someone else's commissioned factory work,
-    or factory work with no resolved requester) is dropped rather than folded
-    into "unattributed" -- a personal dashboard has no business showing it at
-    all. Returns `(records, attributions)`, aligned and filtered together."""
+    """Amendment A-3 / controller ruling R9: keep a hands-on (`interactive`)
+    record only when it is `me_login`'s own (`actor == "human:<me_login>"`,
+    final review I5 -- an interactive record is NOT mine by construction once
+    records from other machines are in the same list), plus a factory record
+    only when its resolved requester (T4's `attribute_record`) is `me_login`.
+    Everything else (a teammate's hands-on work, someone else's commissioned
+    factory work, or factory work with no resolved requester) is dropped
+    rather than folded into "unattributed" -- a personal dashboard has no
+    business showing it at all. With no `me_login` nothing is kept.
+    Returns `(records, attributions)`, aligned and filtered together."""
     scoped_records, scoped_attrs = [], []
+    if not me_login:
+        return scoped_records, scoped_attrs
+    me_actor = f"human:{me_login}"
     for record, attr in zip(records, attributions):
         if record.get("kind") == "interactive":
-            scoped_records.append(record)
-            scoped_attrs.append(attr)
-        elif me_login and attr.get("requester") == me_login:
+            if record.get("actor") == me_actor:
+                scoped_records.append(record)
+                scoped_attrs.append(attr)
+            continue
+        if attr.get("requester") == me_login:
             scoped_records.append(record)
             scoped_attrs.append(attr)
     return scoped_records, scoped_attrs
@@ -363,14 +372,23 @@ def branch_url(repo, branch):
     return f"https://github.com/{repo}/tree/{branch}"
 
 
-def dead_end_payload(issue_rollups, not_planned, records, stale_branch_keys):
+def dead_end_payload(issue_rollups, not_planned, records, stale_branch_keys, attributions=None):
     """spec Sec3B "dead-end $": issues closed `not_planned` (their rescoped
     attributed $) plus local branches with no merged PR 14 days after their
     last session (the hands-on $ actually spent on that branch). Factory
     timeouts/escalations have no data source yet (spec Sec8) and are named,
-    not silently omitted, in `excluded_note`."""
+    not silently omitted, in `excluded_note`.
+
+    Final review I4: a stale branch whose (closed, unmerged) PR links to a
+    `not_planned` issue has its records attributed to that issue, so they're
+    already in the issue's $ -- branch $ counts only records NOT attributed
+    to a `not_planned` issue (`attributions`, aligned with `records`), so no
+    dollar is counted twice."""
     items = []
     total = 0.0
+    not_planned_keys = {(i["repo"], i["number"]) for i in not_planned}
+    if attributions is None:
+        attributions = [{}] * len(records)
     for issue in not_planned:
         key = (issue["repo"], issue["number"])
         usd = issue_rollups.get(key, {}).get("attributed_usd", 0.0)
@@ -380,9 +398,11 @@ def dead_end_payload(issue_rollups, not_planned, records, stale_branch_keys):
 
     stale_set = set(stale_branch_keys)
     per_branch = defaultdict(float)
-    for r in records:
+    for r, attr in zip(records, attributions):
         if r.get("kind") != "interactive":
             continue
+        if (attr or {}).get("issue") in not_planned_keys:
+            continue                              # already counted as that issue's $
         key = (r.get("repo"), r.get("branch"))
         if key in stale_set:
             per_branch[key] += r.get("cost_usd", 0) or 0
@@ -517,20 +537,34 @@ def _rescope_issue_dollars(issue_rollups, scoped_records, scoped_attrs):
     return out
 
 
-def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login=None):
+def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, scope=None):
     """The `outcomes` top-level payload key (controller ruling R3). `records`
     is the SAME usage-record list `efficiency.collect_usage_records` already
     built for the `efficiency` key (spec Sec10 performance budget: no second
     collection pass). `issues`/`prs` are the outcome cache's structured
-    records (spec Sec4.2); `as_of` is a `"YYYY-MM-DD"` day string; `me_login`
-    is the bare GitHub login (`outcome_metrics.actor_login`) for the
-    Amendment A-3 "Me" scope.
+    records (spec Sec4.2); `as_of` is a `"YYYY-MM-DD"` day string.
+
+    `scope` (final review I6) picks the population explicitly:
+    - `scope="<login>"` (bare GitHub login, `actor_login`) -- the Amendment
+      A-3 "Me" view: records via `scope_to_me`, issues via
+      `me_issue_population`, PRs via `me_pr_population`. The local dashboard.
+    - `scope=None` -- the unscoped TEAM view: every record, issue and PR,
+      e.g. for the Synkhos factory snapshot job (synkhos/factory#172). It
+      yields team totals only; per-actor / per-requester team breakdowns are
+      the console's job (it groups the same records by `actor` /
+      `on_behalf_of`), not this function's.
 
     Availability ("outcomes unavailable, with a reason" — spec Sec8) is a
     server-side concern (serve.py checks whether the cache exists at all)
     and is layered on top of this function's return value, not inside it.
     """
     full_attrs = attribute_records(records, prs, issues)
+    joined = build_join(records, issues, prs, as_of=as_of)
+    if scope is None:
+        return _assemble_outcomes(records, full_attrs, joined["issue_rollups"], issues,
+                                  joined["pr_rollups"], prs, as_of, outcomes_as_of)
+
+    me_login = scope
     scoped_records, scoped_attrs = scope_to_me(records, full_attrs, me_login)
 
     # shipped/durable are facts about the issue/PR itself (spec Sec3C/Sec3B),
@@ -539,7 +573,6 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login
     # WHICH issues are in scope is a separate question from their dollars --
     # `me_keys` below restricts every issue-level metric/list to "Me"'s own
     # population, not just the $ that flow through it.
-    joined = build_join(records, issues, prs, as_of=as_of)
     issue_rollups = _rescope_issue_dollars(joined["issue_rollups"], scoped_records, scoped_attrs)
     pr_rollups = joined["pr_rollups"]
 
@@ -553,9 +586,18 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login
     me_pr_keys = me_pr_population(prs, me_keys, me_login)
     pr_rollups = {key: row for key, row in pr_rollups.items() if key in me_pr_keys}
 
-    rows = shipped_issue_rows(issue_rollups, scoped_issues)
-    stale = stale_branches(scoped_records, prs, as_of)
-    dead_end = dead_end_payload(issue_rollups, not_planned_issues(scoped_issues), scoped_records, stale)
+    return _assemble_outcomes(scoped_records, scoped_attrs, issue_rollups, scoped_issues,
+                              pr_rollups, prs, as_of, outcomes_as_of)
+
+
+def _assemble_outcomes(records, attrs, issue_rollups, issues, pr_rollups, prs, as_of,
+                       outcomes_as_of):
+    """Every tile/table/list from an already-scoped population (the "Me" view's
+    or the unscoped team view's -- `build_outcomes_payload` decides)."""
+    rows = shipped_issue_rows(issue_rollups, issues)
+    stale = stale_branches(records, prs, as_of)
+    dead_end = dead_end_payload(issue_rollups, not_planned_issues(issues), records, stale,
+                                attributions=attrs)
 
     tiles = {
         "points_shipped_this_week": points_shipped_this_week(rows, as_of),
@@ -569,8 +611,8 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, me_login
         "outcomes_as_of": outcomes_as_of,
         "tiles": tiles,
         "per_repo": per_repo_table(rows, as_of=as_of),
-        "autonomy_trend": autonomy_trend(scoped_records, scoped_attrs, rows),
+        "autonomy_trend": autonomy_trend(records, attrs, rows),
         "dead_end_list": dead_end["top"],
-        "model_fit": model_fit_candidates(scoped_records, scoped_attrs, scoped_issues),
-        "unattributed": unattributed_summary(scoped_records, scoped_attrs),
+        "model_fit": model_fit_candidates(records, attrs, issues),
+        "unattributed": unattributed_summary(records, attrs),
     }

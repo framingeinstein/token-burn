@@ -262,6 +262,36 @@ def test_dead_end_payload_combines_and_sorts_and_links():
     assert "no data yet" in result["excluded_note"] or "factory#109" in result["excluded_note"]
 
 
+def test_dead_end_payload_does_not_double_count_a_stale_branch_linked_to_a_not_planned_issue_I4():
+    # A stale branch whose closed-unmerged PR closes a not_planned issue: its
+    # $15 is attributed to that issue (counted there) and must NOT be counted
+    # again as branch $. A second record on the same branch that is NOT
+    # attributed to the not_planned issue still counts as branch $.
+    records = [usage_record(repo="o/r", branch="feat/5-x", cost_usd=15.0),
+               usage_record(repo="o/r", branch="feat/5-x", cost_usd=2.0)]
+    attrs = [{"attributed": True, "issue": ("o/r", 5)},
+             {"attributed": False, "issue": None}]
+    issue_rollups = {("o/r", 5): {"attributed_usd": 15.0}}
+    not_planned = [issue(number=5, state_reason="not_planned")]
+    result = dead_end_payload(issue_rollups, not_planned, records, [("o/r", "feat/5-x")],
+                              attributions=attrs)
+    assert result["usd"] == pytest.approx(17.0)          # not 32
+    by_type = {d["type"]: d["usd"] for d in result["top"]}
+    assert by_type == {"issue": pytest.approx(15.0), "branch": pytest.approx(2.0)}
+
+
+def test_build_outcomes_payload_dead_end_probe_is_not_double_counted_I4():
+    records = [usage_record(actor="human:jason", repo="o/r", branch="feat/5-x",
+                            day="2026-08-01", cost_usd=15.0)]
+    issues = [issue(number=5, pts=None, requested_by="jason", state_reason="not_planned",
+                    closed_at="2026-08-10T00:00:00Z")]
+    prs = [pr(number=50, head_ref="feat/5-x", state="closed", merged_at=None, closes=[5])]
+    payload = build_outcomes_payload(records, issues, prs, as_of="2026-09-15",
+                                     outcomes_as_of=None, scope="jason")
+    assert payload["tiles"]["dead_end_usd"]["usd"] == pytest.approx(15.0)
+    assert [d["type"] for d in payload["dead_end_list"]] == ["issue"]
+
+
 def test_dead_end_payload_caps_at_ten():
     not_planned = [issue(number=n, state_reason="not_planned") for n in range(1, 13)]
     issue_rollups = {("o/r", n): {"attributed_usd": float(n)} for n in range(1, 13)}
@@ -398,12 +428,29 @@ def test_scope_to_me_drops_unattributed_factory_records():
     assert scoped_r == []
 
 
-def test_scope_to_me_no_login_drops_all_factory_records():
+def test_scope_to_me_no_login_keeps_nothing():
+    # I5: with no login nothing can be confirmed as "mine" -- not even an
+    # interactive record (it may be a teammate's, e.g. from a shared archive).
     records = [usage_record(kind="interactive"), usage_record(actor="factory:x", kind="unknown")]
     attrs = [{"attributed": False, "requester": None}, {"attributed": True, "requester": "jason"}]
     scoped_r, scoped_a = scope_to_me(records, attrs, None)
-    assert len(scoped_r) == 1
-    assert scoped_r[0]["kind"] == "interactive"
+    assert scoped_r == [] and scoped_a == []
+
+
+def test_scope_to_me_drops_a_teammates_interactive_records_I5():
+    records = [usage_record(actor="human:jason", kind="interactive", cost_usd=1.0),
+               usage_record(actor="human:ricky", kind="interactive", cost_usd=5.0)]
+    attrs = [{"attributed": False, "requester": None}, {"attributed": False, "requester": None}]
+    scoped_r, _ = scope_to_me(records, attrs, "jason")
+    assert [r["actor"] for r in scoped_r] == ["human:jason"]
+
+
+def test_build_outcomes_payload_me_view_excludes_a_teammates_interactive_spend_I5():
+    records = [usage_record(actor="human:jason", cost_usd=1.0, branch="main"),
+               usage_record(actor="human:ricky", cost_usd=5.0, branch="main")]
+    payload = build_outcomes_payload(records, [], [], as_of="2026-09-15",
+                                     outcomes_as_of=None, scope="jason")
+    assert payload["unattributed"]["total_usd"] == pytest.approx(1.0)
 
 
 # --- me_issue_population: WHICH issues are in scope, not just their $ (ruling R10) -------
@@ -480,7 +527,7 @@ def test_build_outcomes_payload_rescopes_dollars_to_me():
               issue(number=11, pts=2, requested_by="ricky")]
     prs = [pr(number=20, closes=[10])]
     payload = build_outcomes_payload(records, issues, prs, as_of="2026-09-15",
-                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+                                      outcomes_as_of="2026-09-15T00:00:00Z", scope="jason")
     assert payload["outcomes_as_of"] == "2026-09-15T00:00:00Z"
     # issue 10 (mine): $1 + $2 = $3 attributed; issue 11 (ricky's, dropped) never appears
     per_repo = payload["per_repo"][0]
@@ -516,7 +563,7 @@ def test_build_outcomes_payload_excludes_a_teammates_shipped_rated_issue_R10():
         pr(number=21, closes=[11], head_ref="feat/11-x"),
     ]
     payload = build_outcomes_payload(records, issues, prs, as_of="2026-09-15",
-                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+                                      outcomes_as_of="2026-09-15T00:00:00Z", scope="jason")
 
     per_repo = payload["per_repo"][0]
     assert per_repo["cost_per_point"]["median"] == pytest.approx(1.5)   # only #10: $3 / 2pts
@@ -537,7 +584,7 @@ def test_build_outcomes_payload_includes_an_issue_i_requested_even_with_zero_dol
     issues = [issue(number=13, pts=3, requested_by="jason", closed_at="2026-09-14T00:00:00Z")]
     prs = [pr(number=23, closes=[13], head_ref="feat/13-x")]
     payload = build_outcomes_payload([], issues, prs, as_of="2026-09-15",
-                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+                                      outcomes_as_of="2026-09-15T00:00:00Z", scope="jason")
     per_repo = payload["per_repo"][0]
     assert per_repo["points_shipped"] == 3
     assert per_repo["cost_per_point"]["coverage"] == {"counted": 1, "total": 1, "pct": 100.0}
@@ -560,7 +607,7 @@ def test_build_outcomes_payload_durable_merge_rate_scoped_to_me_R10a():
            reverts=40),
     ]
     payload = build_outcomes_payload([], issues, prs, as_of="2026-09-15",
-                                      outcomes_as_of="2026-09-15T00:00:00Z", me_login="jason")
+                                      outcomes_as_of="2026-09-15T00:00:00Z", scope="jason")
     rate = payload["tiles"]["durable_merge_rate"]
     # only MY two PRs (#20, #30) count -- ricky's #40/#41 are excluded entirely,
     # so ricky's revert never drags down my rate.
@@ -569,8 +616,47 @@ def test_build_outcomes_payload_durable_merge_rate_scoped_to_me_R10a():
 
 
 def test_build_outcomes_payload_shape_has_all_sections():
-    payload = build_outcomes_payload([], [], [], as_of="2026-09-15", outcomes_as_of=None, me_login="jason")
+    payload = build_outcomes_payload([], [], [], as_of="2026-09-15", outcomes_as_of=None, scope="jason")
     for key in ("outcomes_as_of", "tiles", "per_repo", "autonomy_trend", "dead_end_list", "model_fit", "unattributed"):
         assert key in payload
     assert payload["tiles"]["rework_share"]["share"] is None
     assert "no data yet" in payload["tiles"]["rework_share"]["note"] or "factory#109" in payload["tiles"]["rework_share"]["note"]
+
+
+# --- I6 (final review): an explicit scope -- None is the unscoped team view ----------
+
+def _team_fixture():
+    records = [
+        usage_record(actor="human:jason", kind="interactive", branch="feat/10-x", cost_usd=1.0),
+        usage_record(actor="human:ricky", kind="interactive", branch="main", cost_usd=5.0),
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None, issue=10, cost_usd=2.0),
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None, issue=11, cost_usd=3.0),
+        usage_record(actor="factory:wb-impl-r", kind="unknown", branch=None, issue=None, cost_usd=4.0),
+    ]
+    issues = [issue(number=10, pts=2, requested_by="jason", closed_at="2026-09-14T00:00:00Z"),
+              issue(number=11, pts=3, requested_by="ricky", closed_at="2026-09-14T00:00:00Z")]
+    prs = [pr(number=20, closes=[10], head_ref="feat/10-x"),
+           pr(number=21, author="ricky", closes=[11], head_ref="feat/11-x")]
+    return records, issues, prs
+
+
+def test_build_outcomes_payload_team_view_counts_every_record_I6():
+    records, issues, prs = _team_fixture()
+    payload = build_outcomes_payload(records, issues, prs, as_of="2026-09-15",
+                                     outcomes_as_of=None, scope=None)
+    assert payload["unattributed"]["total_usd"] == pytest.approx(sum(r["cost_usd"] for r in records))
+    per_repo = payload["per_repo"][0]
+    assert per_repo["points_shipped"] == 5                      # both issues, not just mine
+    assert per_repo["cost_per_point"]["coverage"]["total"] == 2
+    assert payload["tiles"]["durable_merge_rate"]["coverage"]["total"] == 2
+
+
+def test_build_outcomes_payload_me_view_is_unchanged_by_the_scope_parameter_I6():
+    records, issues, prs = _team_fixture()
+    payload = build_outcomes_payload(records, issues, prs, as_of="2026-09-15",
+                                     outcomes_as_of=None, scope="jason")
+    # my interactive $1 + the factory $2 I commissioned; ricky's $5/$3 and the
+    # unattributed factory $4 are not mine
+    assert payload["unattributed"]["total_usd"] == pytest.approx(3.0)
+    assert payload["per_repo"][0]["points_shipped"] == 2
+    assert payload["per_repo"][0]["cost_per_point"]["median"] == pytest.approx(1.5)

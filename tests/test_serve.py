@@ -89,6 +89,15 @@ def test_build_outcomes_section_unavailable_when_cache_dir_has_no_files(tmp_path
     assert "no outcome cache yet" in result["reason"]
 
 
+def test_build_outcomes_section_without_a_login_is_unavailable_not_the_team_view(tmp_path):
+    cache_dir = tmp_path / "outcomes"
+    paths = cache_paths(cache_dir)
+    append_jsonl(paths["issues"], {"repo": "o/r", "number": 10, "state": "open"})
+    result = build_outcomes_section(cache_dir, [], "2026-09-15", None)
+    assert result["available"] is False
+    assert "login" in result["reason"]
+
+
 def test_build_outcomes_section_available_reads_cache_and_scopes_to_me(tmp_path):
     cache_dir = tmp_path / "outcomes"
     paths = cache_paths(cache_dir)

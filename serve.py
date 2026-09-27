@@ -50,12 +50,17 @@ def build_outcomes_section(cache_dir, records, today, me_login):
     if not paths["issues"].exists() and not paths["prs"].exists():
         return {"available": False,
                 "reason": "no outcome cache yet -- run python3 outcomes.py to fetch it"}
+    if not me_login:
+        # I6: scope=None is the unscoped TEAM view -- never shown on this
+        # personal dashboard just because no login is configured.
+        return {"available": False,
+                "reason": "no GitHub login configured -- pass --actor or configure gh"}
     state = read_state(paths["state"])
     issues = list(read_jsonl_latest(paths["issues"], lambda r: (r["repo"], r["number"])).values())
     prs = list(read_jsonl_latest(paths["prs"], lambda r: (r["repo"], r["number"])).values())
     payload = build_outcomes_payload(
         records, issues, prs, as_of=today, outcomes_as_of=state.get("outcomes_as_of"),
-        me_login=me_login)
+        scope=me_login)
     payload["available"] = True
     return payload
 
