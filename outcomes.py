@@ -238,7 +238,7 @@ def closes_from_branch(head_ref):
 
 
 def resolve_pr_closes(repo, pr_number, head_ref, events, token, quota, transport,
-                       graphql=graphql_closing_issues, body=None):
+                       graphql=graphql_closing_issues, body=None, merged=True):
     """REST first -- `connected` timeline events, then closing keywords in the
     PR body (read in memory, never stored), then the issue-branch pattern;
     GraphQL only when all of those resolve nothing (spec Sec5.2 row 5 -- the
@@ -252,6 +252,10 @@ def resolve_pr_closes(repo, pr_number, head_ref, events, token, quota, transport
     closes = closes_from_branch(head_ref)
     if closes:
         return closes
+    if not merged:
+        # Only merged PRs feed attribution and "shipped"; an unmerged PR that
+        # closes nothing would otherwise cost a GraphQL call each.
+        return []
     return graphql(repo, pr_number, token, quota, transport)
 
 
@@ -376,7 +380,8 @@ def _process_prs(repo, repo_state, token, quota, transport, paths, report):
             events = issue_timeline(repo, pr["number"], token, quota, transport)
             closes = resolve_pr_closes(
                 repo, pr["number"], (pr.get("head") or {}).get("ref"),
-                events, token, quota, transport, body=pr.get("body"))
+                events, token, quota, transport, body=pr.get("body"),
+                merged=bool(pr.get("merged_at")))
             append_jsonl(paths["prs"], build_pr_record(repo, pr, events, closes))
             report["prs"] += 1
             processed.append(pr.get("updated_at"))
@@ -433,8 +438,9 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, owners=DEFAULT_OWNERS, token=Non
             report["stopped"] = "quota_floor"
             report["calls"] = dict(quota.calls)
             return report
-        except GitHubUnreachable:
+        except GitHubUnreachable as e:
             report["stopped"] = "unreachable"
+            report["unreachable_reason"] = str(e)
             report["calls"] = dict(quota.calls)
             return report
         except GitHubError as e:
@@ -453,9 +459,10 @@ def fetch_outcomes(cache_dir=DEFAULT_CACHE_DIR, owners=DEFAULT_OWNERS, token=Non
             report["stopped"] = "quota_floor"
             report["calls"] = dict(quota.calls)
             return report
-        except GitHubUnreachable:
+        except GitHubUnreachable as e:
             write_state(paths["state"], state)
             report["stopped"] = "unreachable"
+            report["unreachable_reason"] = str(e)
             report["calls"] = dict(quota.calls)
             return report
         except GitHubError as e:

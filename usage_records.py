@@ -272,6 +272,9 @@ def _call_entries(recs, tz, prices):
     """One entry per deduped assistant call, numbered 1..n by position within
     the session (the numbering context-growth bucketing needs)."""
     entries = []
+    # Claude Code's "<synthetic>" placeholder messages carry zero usage and a
+    # model name the schema rejects; they are not spend, so they are skipped.
+    recs = [r for r in recs if r.get("model") != "<synthetic>"]
     for i, r in enumerate(recs):
         day = local_day(r["timestamp"], tz)
         model = r["model"]

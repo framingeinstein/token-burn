@@ -649,3 +649,21 @@ def test_records_never_share_a_key_when_branches_sanitize_to_the_same_value():
     assert len(keys) == len(set(keys))
     assert round(sum(r["cost_usd"] for r in recs), 6) == 3.0
     assert len(recs) == 1 and recs[0]["branch"] is None and recs[0]["calls"] == 3
+
+
+def test_synthetic_zero_token_messages_are_not_recorded():
+    # Claude Code writes placeholder assistant messages with model "<synthetic>"
+    # and zero usage; the schema's model pattern rejects them, which refused whole
+    # days in the first backfill. They carry no spend, so they are skipped.
+    import usage_records as ur
+    from zoneinfo import ZoneInfo
+    from prices import load_prices
+    base = {"timestamp": "2026-09-27T12:00:00Z", "in": 1, "out": 1, "cc": 0, "cr": 0, "branch": None}
+    recs = [dict(base, id="m1", model="claude-opus-4-8"),
+            dict(base, id="m2", model="<synthetic>", **{"in": 0, "out": 0})]
+    entries = ur._call_entries(recs, ZoneInfo("UTC"), load_prices())
+    assert [e["model"] for e in entries] == ["claude-opus-4-8"]
+    out = ur._build_records(entries, actor="human:jason", repo=None, session_id="s1",
+                            kind="interactive")
+    for r in out:
+        ur.validate_usage_record(r)
