@@ -278,7 +278,8 @@ def test_default_transport_wraps_connection_errors():
         raise URLError("nope")
 
     with pytest.raises(GitHubUnreachable):
-        gc.default_transport("GET", "https://api.github.com/x", {}, urlopen=boom)
+        gc.default_transport("GET", "https://api.github.com/x", {}, urlopen=boom,
+                             sleep=lambda s: None)
 
 
 # --- fix round 1: non-2xx surfaces as GitHubError, never as "no items" ------
@@ -314,3 +315,43 @@ def test_list_owner_repos_propagates_github_error():
     transport = FakeTransport([(403, rl(4999), {"message": "secondary rate limit"})])
     with pytest.raises(GitHubError):
         list_owner_repos("synkhos", "tok", q, transport)
+
+
+def test_default_transport_retries_transient_errors_then_succeeds():
+    import io
+    import github_client as gc
+    from urllib.error import URLError
+    calls = []
+
+    class Resp(io.BytesIO):
+        status = 200
+        def getheaders(self):
+            return []
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise URLError("reset")
+        if len(calls) == 2:
+            raise TimeoutError("read timed out")
+        return Resp(b"[]")
+
+    status, _, parsed = gc.default_transport("GET", "https://api.github.com/x", {},
+                                             urlopen=flaky, sleep=lambda s: None)
+    assert (status, parsed, len(calls)) == (200, [], 3)
+
+
+def test_default_transport_gives_up_after_retries_with_the_reason():
+    import github_client as gc
+
+    def dead(req, timeout=None):
+        raise TimeoutError("read timed out")
+
+    with pytest.raises(GitHubUnreachable) as exc:
+        gc.default_transport("GET", "https://api.github.com/x", {}, urlopen=dead,
+                             sleep=lambda s: None)
+    assert "timed out" in str(exc.value)

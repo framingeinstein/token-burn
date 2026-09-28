@@ -660,3 +660,17 @@ def test_fetch_resolves_closes_from_the_pr_body_and_never_stores_it_I9(tmp_path)
     rec = json.loads(raw.strip())
     assert rec["closes"] == [7]
     assert "secret-ish" not in raw and "body" not in rec
+
+
+def test_unmerged_pr_never_falls_back_to_graphql():
+    # Relaunch: 122 GraphQL calls in one run, one per PR that closes nothing.
+    # Only merged PRs affect attribution/shipped, so unmerged ones skip GraphQL.
+    called = []
+    def gql(*a, **k):
+        called.append(a)
+        return [9]
+    assert resolve_pr_closes("o/r", 1, "wip", [], "tok", Quota(), object(),
+                             graphql=gql, body="", merged=False) == []
+    assert called == []
+    assert resolve_pr_closes("o/r", 1, "wip", [], "tok", Quota(), object(),
+                             graphql=gql, body="", merged=True) == [9]

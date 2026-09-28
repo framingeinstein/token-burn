@@ -13,6 +13,7 @@ The HTTP transport is an injected callable `(method, url, headers, body) ->
 `gh auth token` lookup is likewise injectable.
 """
 import json
+import time
 import re
 import subprocess
 from urllib.error import HTTPError, URLError
@@ -72,13 +73,29 @@ def github_token(run=subprocess.run):
 
 # --- transport -----------------------------------------------------------
 
-def default_transport(method, url, headers, body=None, urlopen=_urlopen):
+_RETRY_DELAYS = (1.0, 3.0)   # seconds before the 2nd and 3rd attempt
+
+
+def default_transport(method, url, headers, body=None, urlopen=_urlopen, sleep=time.sleep):
     """Real HTTP transport (urllib, stdlib only). Returns (status, headers,
     parsed_json) for both success and HTTP-error responses (including 304, which
     urllib raises as an HTTPError); raises GitHubUnreachable for connection-level
     failures so callers can tell "no change" apart from "GitHub is down"."""
     data = json.dumps(body).encode() if body is not None else None
-    req = Request(url, data=data, headers=headers, method=method)
+    last = None
+    for delay in (0.0,) + _RETRY_DELAYS:
+        if delay:
+            sleep(delay)
+        try:
+            return _attempt(Request(url, data=data, headers=headers, method=method), urlopen)
+        except (URLError, TimeoutError, ConnectionError) as e:
+            # Transient connection-level failure (reset, DNS blip, read timeout --
+            # a read timeout is a TimeoutError, not a URLError): retry, then give up.
+            last = e
+    raise GitHubUnreachable(f"{type(last).__name__}: {last}") from last
+
+
+def _attempt(req, urlopen):
     try:
         with urlopen(req, timeout=30) as resp:
             raw = resp.read()
@@ -93,8 +110,6 @@ def default_transport(method, url, headers, body=None, urlopen=_urlopen):
         except Exception:
             parsed = None
         return e.code, hdrs, parsed
-    except URLError as e:
-        raise GitHubUnreachable(str(e)) from e
 
 
 # --- quota -----------------------------------------------------------------
