@@ -8,6 +8,25 @@
   :root {
     --navy:#1B2A4A; --gold:#F0A500; --ink:#2b3340; --muted:#8a93a6;
     --line:#e6e8ee; --bg:#ffffff; --cell0:#eef1f5;
+    /* verdict chips: each carries its own bg+fg pair so it reads on any page background */
+    --v-good-bg:#dcf3e3; --v-good-fg:#0f5a2a;
+    --v-watch-bg:#fdf0c9; --v-watch-fg:#6b4a00;
+    --v-poor-bg:#fbdcd8; --v-poor-fg:#8c1d13;
+    --v-none-bg:#e8ebf0; --v-none-fg:#465064;
+    --v-info-bg:#dfe9f7; --v-info-fg:#1f4677;
+    --mix-read:#3a6ea5; --mix-write:#7a5fb0; --mix-out:#F0A500; --mix-in:#5aa17f;
+    --tip-bg:#1B2A4A; --tip-fg:#ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --v-good-bg:#16402a; --v-good-fg:#a9e6bd;
+      --v-watch-bg:#4a3a0a; --v-watch-fg:#f6d97a;
+      --v-poor-bg:#5a1f1a; --v-poor-fg:#ffb8b0;
+      --v-none-bg:#2c3342; --v-none-fg:#b6bfd0;
+      --v-info-bg:#1e3556; --v-info-fg:#b3d0f5;
+      --mix-read:#6fa3d8; --mix-write:#a58bd6; --mix-out:#f5b93a; --mix-in:#7fc4a2;
+      --tip-bg:#e6e8ee; --tip-fg:#1B2A4A;
+    }
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
@@ -33,6 +52,29 @@
   td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .did { color:var(--ink); } .did .proj { color:var(--navy); font-weight:600; }
   .did .ses { color:var(--muted); }
+  .vchip { position:relative; display:inline-block; margin-left:6px; padding:1px 8px; border-radius:10px;
+    font-size:11px; font-weight:600; cursor:help; outline:none; vertical-align:middle; white-space:nowrap; }
+  .vchip.good { background:var(--v-good-bg); color:var(--v-good-fg); }
+  .vchip.watch { background:var(--v-watch-bg); color:var(--v-watch-fg); }
+  .vchip.poor { background:var(--v-poor-bg); color:var(--v-poor-fg); }
+  .vchip.no_data { background:var(--v-none-bg); color:var(--v-none-fg); }
+  .vchip.info { background:var(--v-info-bg); color:var(--v-info-fg); }
+  .vchip .tip { display:none; position:absolute; left:0; top:calc(100% + 6px); z-index:10; width:280px;
+    padding:8px 10px; border-radius:8px; background:var(--tip-bg); color:var(--tip-fg);
+    font-size:12px; font-weight:400; line-height:1.4; white-space:normal; box-shadow:0 4px 14px rgba(0,0,0,.25); }
+  .vchip:hover .tip, .vchip:focus .tip { display:block; }
+  .vchip .tip b { display:block; margin-bottom:2px; }
+  .vchip .tip .act { display:block; margin-top:5px; }
+  .dir { color:var(--muted); font-size:11px; margin-left:6px; }
+  .tile { min-width:170px; }
+  .tile .val { font-size:20px; font-weight:800; color:var(--navy); }
+  .tile .lbl { color:var(--muted); font-size:12px; }
+  .mixbar { display:flex; height:18px; border-radius:4px; overflow:hidden; background:var(--cell0); max-width:620px; }
+  .mixbar span { display:block; height:100%; }
+  .mixleg { display:flex; gap:18px; flex-wrap:wrap; margin-top:6px; font-size:12px; color:var(--ink); }
+  .mixleg i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }
+  details.guide { margin-top:14px; font-size:12px; color:var(--ink); }
+  details.guide summary { cursor:pointer; color:var(--navy); font-weight:600; }
   footer { padding:18px 32px 40px; color:var(--muted); font-size:12px; border-top:1px solid var(--line); }
 </style>
 </head>
@@ -285,6 +327,69 @@ function drawCursorBilling(){
 // ---------- efficiency (token-level, exact, 100% of spend — no METRIC/SOURCE toggle: ----------
 // ---------- these are ratios and mean-token counts, not $-vs-tokens amounts) -----------------
 function fmtPct(v){ return v==null ? '—' : (v*100).toFixed(1)+'%'; }
+// ---- metric guide: verdict chips (thresholds come from metric-guide.json via DATA.metric_guide) ----
+const VERDICT_TEXT={good:'good',watch:'watch',poor:'poor',no_data:'no data',info:'info'};
+const COMPARISON_TEXT={better:'better',same:'about the same',worse:'worse',not_enough_data:'not enough data'};
+function dirText(direction){
+  return direction==='higher_is_better' ? '↑ higher is better'
+       : direction==='lower_is_better' ? '↓ lower is better' : '';
+}
+function dirLabel(v){
+  const t=v ? dirText(v.direction) : '';
+  return t ? `<span class="dir">${esc(t)}</span>` : '';
+}
+// chip + hover/tap tooltip (tabindex makes it focusable, so a tap opens it on touch)
+function verdictChip(v){
+  if(!v) return '';
+  const text = v.comparison ? COMPARISON_TEXT[v.comparison]||v.comparison : VERDICT_TEXT[v.verdict]||v.verdict;
+  let tip=`<b>${esc(v.label||'')}${v.direction&&v.direction!=='none'?' — '+esc(dirText(v.direction)):''}</b>${esc(v.meaning||'')}`;
+  if(v.note) tip+=`<span class="act">${esc(v.note)}</span>`;
+  if(v.action) tip+=`<span class="act"><b>What to do</b>${esc(v.action)}</span>`;
+  if(v.low_confidence) tip+=`<span class="act">Low confidence: ρ &lt; 0.3 or fewer than 15 rated issues.</span>`;
+  if(v.comparison && v.current!=null && v.baseline!=null)
+    tip+=`<span class="act">now ${esc(String(+v.current.toFixed(2)))} vs baseline ${esc(String(+v.baseline.toFixed(2)))}${v.change==null?'':' ('+(v.change>=0?'+':'')+(v.change*100).toFixed(0)+'%)'}</span>`;
+  return `<span class="vchip ${esc(v.verdict)}" tabindex="0">${esc(text)}<span class="tip">${tip}</span></span>`;
+}
+function effTile(value,label,v,sub){
+  return `<div class="tile"><div class="val">${value}</div>
+    <div class="lbl">${esc(label)}${verdictChip(v)}${dirLabel(v)}</div>
+    ${sub?`<div class="lbl" style="font-size:11px;margin-top:2px">${esc(sub)}</div>`:''}</div>`;
+}
+function bandText(b){
+  const f=x=>x.toLocaleString();
+  if(b.lo==null) return `${b.hi_inclusive?'≤':'<'} ${f(b.hi)}`;
+  if(b.hi==null) return `${b.lo_inclusive?'≥':'>'} ${f(b.lo)}`;
+  return `${f(b.lo)} ${b.lo_inclusive?'≤':'<'} x ${b.hi_inclusive?'≤':'<'} ${f(b.hi)}`;
+}
+function drawGuideLegend(){
+  const g=DATA.metric_guide;
+  if(!g || g.available===false || !g.metrics) return '';
+  let rows='';
+  for(const [id,m] of Object.entries(g.metrics)){
+    let bands='';
+    if(m.kind==='banded') bands=m.bands.map(b=>`${esc(b.verdict)} ${esc(bandText(b))}`).join(' · ');
+    else if(m.kind==='relative') bands=`vs the 4 weeks before (±${Math.round((m.tolerance==null?0.1:m.tolerance)*100)}% = about the same)`;
+    else bands='no band — informational';
+    rows+=`<tr><td>${esc(m.label)}</td><td>${esc(dirText(m.direction)||'—')}</td><td>${bands}</td><td>${esc(m.note||'')}</td></tr>`;
+  }
+  return `<details class="guide"><summary>How to read these verdicts</summary>
+    <table><thead><tr><th>Metric</th><th>Direction</th><th>Bands</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>
+    <div style="color:var(--muted);margin-top:4px">Thresholds live in metric-guide.json.</div></details>`;
+}
+const MIX_PARTS=[['cache_read','cache read','--mix-read'],['cache_write','cache write','--mix-write'],
+                 ['output','output','--mix-out'],['input','input','--mix-in']];
+function drawCostMix(mix){
+  if(!mix || !mix.total_usd) return '';
+  let bar='',leg='';
+  for(const [k,name,tok] of MIX_PARTS){
+    const part=mix[k]||{usd:0,share:null};
+    const pct=part.share==null?0:part.share*100;
+    bar+=`<span style="width:${pct}%;background:var(${tok})" title="${esc(name)} ${esc(fmtUsd(part.usd))} (${esc(fmtPct(part.share))})"></span>`;
+    leg+=`<span><i style="background:var(${tok})"></i>${esc(name)} ${esc(fmtUsd(part.usd))} · ${esc(fmtPct(part.share))}</span>`;
+  }
+  return `<div style="color:var(--muted);font-size:12px;margin:14px 0 4px">where the money goes — share of $ by token kind (${esc(fmtUsd(mix.total_usd))} priced)</div>
+    <div class="mixbar">${bar}</div><div class="mixleg">${leg}</div>`;
+}
 function ctxBarRow(label,val,maxVal,W,color){
   const w=maxVal?Math.max(val?2:0,(val/maxVal)*(W-150)):0;
   return `<div style="display:flex;align-items:center;gap:8px;margin:5px 0">
@@ -320,16 +425,21 @@ function drawEfficiency(){
     return;
   }
   hint.textContent=`token-level efficiency — exact, covers ${eff.coverage_pct}% of spend (no GitHub join).`;
+  const V=eff.verdicts||{};
   let html='<div style="display:flex;gap:32px;flex-wrap:wrap;margin-bottom:16px">';
-  html+=`<div><strong>${fmtPct(eff.cache_hit_rate)}</strong><div style="color:var(--muted);font-size:12px">cache hit rate (overall)</div></div>`;
-  html+=`<div><strong>${fmtPct(eff.output_share)}</strong><div style="color:var(--muted);font-size:12px">output share (overall)</div></div>`;
-  html+=`<div><strong>$${eff.spend_usd.toFixed(2)}</strong><div style="color:var(--muted);font-size:12px">spend behind this section</div></div>`;
+  html+=effTile(eff.context_per_call==null?'—':fmtTok(eff.context_per_call)+' tok', 'context per call', V.context_per_call, 'tokens read per model call: (input + cache write + cache read) / calls');
+  html+=effTile(fmtPct(eff.cache_hit_rate), 'cache hit rate (overall)', V.cache_hit_rate, 'a floor, not a target — 100% is not a goal (every turn adds new context)');
+  html+=effTile(fmtPct(eff.output_share), 'output share (overall)', V.output_share, 'agentic work is naturally low; shown for context');
+  html+=effTile('$'+eff.spend_usd.toFixed(2), 'spend behind this section', null, '');
   html+='</div>';
-  html+='<div style="color:var(--muted);font-size:12px;margin-bottom:4px">cache hit rate over time</div>';
+  if(eff.verdicts_unavailable) html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:8px">verdicts unavailable — ${esc(eff.verdicts_unavailable)}</div>`;
+  html+=drawCostMix(eff.cost_mix);
+  html+='<div style="color:var(--muted);font-size:12px;margin:14px 0 4px">cache hit rate over time</div>';
   html+=drawEfficiencyChart(eff.days);
-  html+='<div style="color:var(--muted);font-size:12px;margin:14px 0 4px">context growth — mean context tokens per call, by call number within a session</div>';
+  html+=`<div style="color:var(--muted);font-size:12px;margin:14px 0 4px">context growth — mean context tokens per call, by call number within a session${eff.context_growth_ratio==null?'':' · late/early ×'+eff.context_growth_ratio.toFixed(2)}${verdictChip(V.context_growth)}${dirLabel(V.context_growth)}</div>`;
   const maxMean=Math.max(1, ...eff.context_growth.map(b=>b.mean_ctx||0));
   for(const b of eff.context_growth) html+=ctxBarRow(b.bucket, b.mean_ctx, maxMean, 620, '#3a6ea5');
+  html+=drawGuideLegend();
   host.innerHTML=html;
 }
 
@@ -340,8 +450,8 @@ function covLine(cov){
   if(!cov || !cov.total) return 'covers 0 of 0 — no data yet';
   return `covers ${cov.counted} of ${cov.total} (${cov.pct==null?'—':cov.pct+'%'})`;
 }
-function outcomeTile(value,label,cov){
-  return `<div style="min-width:160px"><strong>${value}</strong><div style="color:var(--muted);font-size:12px">${esc(label)}</div><div style="color:var(--muted);font-size:11px;margin-top:2px">${esc(covLine(cov))}</div></div>`;
+function outcomeTile(value,label,cov,v){
+  return `<div style="min-width:160px"><strong>${value}</strong><div style="color:var(--muted);font-size:12px">${esc(label)}${verdictChip(v)}${dirLabel(v)}</div>${cov===null?'':`<div style="color:var(--muted);font-size:11px;margin-top:2px">${esc(covLine(cov))}</div>`}</div>`;
 }
 function validityBadge(v){
   if(!v || !v.badge) return '';
@@ -358,12 +468,16 @@ function drawOutcomes(){
 
   const t=out.tiles;
   let html='<div style="display:flex;gap:28px;flex-wrap:wrap;margin-bottom:8px">';
-  html+=outcomeTile(t.points_shipped_this_week.points, 'points shipped this week', t.points_shipped_this_week.coverage);
-  html+=outcomeTile(t.cost_per_point.median==null?'—':`${fmtUsd(t.cost_per_point.median)} (p90 ${fmtUsd(t.cost_per_point.p90)})`, '$/pt median (p90)', t.cost_per_point.coverage);
-  html+=outcomeTile(fmtPct(t.durable_merge_rate.rate), 'durable-merge rate', t.durable_merge_rate.coverage);
-  html+=outcomeTile('—', 'rework share', t.rework_share.coverage);
+  const OV=out.verdicts||{};
+  html+=outcomeTile(t.points_shipped_this_week.points, 'points shipped this week', t.points_shipped_this_week.coverage, OV.throughput);
+  html+=outcomeTile(t.cost_per_point.median==null?'—':`${fmtUsd(t.cost_per_point.median)} (p90 ${fmtUsd(t.cost_per_point.p90)})`, '$/pt median (p90)', t.cost_per_point.coverage, OV.cost_per_point);
+  html+=outcomeTile(fmtPct(t.durable_merge_rate.rate), 'durable-merge rate', t.durable_merge_rate.coverage, OV.durable_merge_rate);
+  html+=outcomeTile('—', 'rework share', t.rework_share.coverage, OV.rework_share);
   html+=outcomeTile(fmtUsd(t.dead_end_usd.usd), 'dead-end $', null);
+  html+=outcomeTile(fmtPct(out.dead_end_share), 'dead-end share of spend', null, OV.dead_end_share);
+  html+=outcomeTile(out.validity&&out.validity.rho!=null?out.validity.rho.toFixed(2):'—', `points validity ρ (n=${out.validity?out.validity.n:0})`, null, OV.validity_rho);
   html+='</div>';
+  if(out.verdicts_unavailable) html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:4px">verdicts unavailable — ${esc(out.verdicts_unavailable)}</div>`;
   html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:4px">rework share: ${esc(t.rework_share.note)}</div>`;
   html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:16px">dead-end $: ${esc(t.dead_end_usd.note)}</div>`;
 

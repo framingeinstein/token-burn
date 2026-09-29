@@ -59,8 +59,9 @@ timeouts/escalations have no data source yet and are named as excluded.
 """
 import math
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
+from metric_guide import classify, classify_relative
 from attribution import (
     attribute_records,
     build_join,
@@ -434,6 +435,76 @@ def points_shipped_this_week(rows, as_of):
     }
 
 
+# --- weekly baselines: latest ISO week vs the 4 before it ($/pt, throughput) -----------
+
+_BASELINE_WEEKS = 4
+
+
+def _week_monday(week):
+    y, w = week.split("-W")
+    return date.fromisocalendar(int(y), int(w), 1)
+
+
+def weekly_baselines(rows, as_of):
+    """The relative-metric inputs: for the latest ISO week (<= `as_of`'s week) in
+    which a RATED issue shipped, its median $/pt and points shipped, against the
+    4 calendar weeks before it -- pooled median $/pt and mean weekly points
+    (quiet weeks count as 0 points). A side with no data is None ("not enough
+    data"); the baseline is None when none of the 4 weeks shipped anything."""
+    cap = iso_week(as_of)
+    by_week = defaultdict(list)
+    for r in rows:
+        if r.get("pts") is None or not r.get("closed_at"):
+            continue
+        wk = iso_week(r["closed_at"])
+        if wk <= cap:
+            by_week[wk].append(r)
+    if not by_week:
+        return {"week": None, "cost_per_point": {"current": None, "baseline": None},
+                "throughput": {"current": None, "baseline": None}}
+    latest = max(by_week)
+    monday = _week_monday(latest)
+    prior = [iso_week((monday - timedelta(weeks=n)).isoformat())
+             for n in range(1, _BASELINE_WEEKS + 1)]
+
+    def ratios(week_rows):
+        return [r["attributed_usd"] / r["pts"] for r in week_rows if r["pts"]]
+
+    prior_rows = [r for wk in prior for r in by_week.get(wk, [])]
+    return {
+        "week": latest,
+        "cost_per_point": {
+            "current": median(ratios(by_week[latest])),
+            "baseline": median(ratios(prior_rows)),
+        },
+        "throughput": {
+            "current": sum(r["pts"] for r in by_week[latest]),
+            "baseline": (sum(r["pts"] for r in prior_rows) / _BASELINE_WEEKS)
+                        if prior_rows else None,
+        },
+    }
+
+
+def outcome_verdicts(guide, tiles, dead_end_share, validity, baselines):
+    """`verdicts` for the outcomes payload: banded metrics from the tiles,
+    relative ones from `weekly_baselines`."""
+    v = {
+        "durable_merge_rate": classify(guide, "durable_merge_rate",
+                                       tiles["durable_merge_rate"]["rate"]),
+        "rework_share": classify(guide, "rework_share", tiles["rework_share"]["share"]),
+        "dead_end_share": classify(guide, "dead_end_share", dead_end_share),
+        "validity_rho": classify(guide, "validity_rho", validity["rho"]),
+        "cost_per_point": classify_relative(guide, "cost_per_point",
+                                            baselines["cost_per_point"]["current"],
+                                            baselines["cost_per_point"]["baseline"]),
+        "throughput": classify_relative(guide, "throughput",
+                                        baselines["throughput"]["current"],
+                                        baselines["throughput"]["baseline"]),
+    }
+    v["validity_rho"]["low_confidence"] = bool(validity["badge"])
+    return v
+
+
 # --- autonomy trend: factory share of points shipped, human $/factory-shipped point -----
 
 def autonomy_trend(records, attributions, rows):
@@ -537,7 +608,8 @@ def _rescope_issue_dollars(issue_rollups, scoped_records, scoped_attrs):
     return out
 
 
-def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, scope=None):
+def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, scope=None,
+                           guide=None, guide_error=None):
     """The `outcomes` top-level payload key (controller ruling R3). `records`
     is the SAME usage-record list `efficiency.collect_usage_records` already
     built for the `efficiency` key (spec Sec10 performance budget: no second
@@ -557,12 +629,17 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, scope=No
     Availability ("outcomes unavailable, with a reason" — spec Sec8) is a
     server-side concern (serve.py checks whether the cache exists at all)
     and is layered on top of this function's return value, not inside it.
+
+    `guide` (a loaded metric-guide.json) adds `verdicts`; without one,
+    `verdicts_unavailable` carries `guide_error`. `dead_end_share` and
+    `validity` are always present.
     """
     full_attrs = attribute_records(records, prs, issues)
     joined = build_join(records, issues, prs, as_of=as_of)
     if scope is None:
         return _assemble_outcomes(records, full_attrs, joined["issue_rollups"], issues,
-                                  joined["pr_rollups"], prs, as_of, outcomes_as_of)
+                                  joined["pr_rollups"], prs, as_of, outcomes_as_of,
+                                  guide=guide, guide_error=guide_error)
 
     me_login = scope
     scoped_records, scoped_attrs = scope_to_me(records, full_attrs, me_login)
@@ -587,11 +664,12 @@ def build_outcomes_payload(records, issues, prs, as_of, outcomes_as_of, scope=No
     pr_rollups = {key: row for key, row in pr_rollups.items() if key in me_pr_keys}
 
     return _assemble_outcomes(scoped_records, scoped_attrs, issue_rollups, scoped_issues,
-                              pr_rollups, prs, as_of, outcomes_as_of)
+                              pr_rollups, prs, as_of, outcomes_as_of,
+                              guide=guide, guide_error=guide_error)
 
 
 def _assemble_outcomes(records, attrs, issue_rollups, issues, pr_rollups, prs, as_of,
-                       outcomes_as_of):
+                       outcomes_as_of, guide=None, guide_error=None):
     """Every tile/table/list from an already-scoped population (the "Me" view's
     or the unscoped team view's -- `build_outcomes_payload` decides)."""
     rows = shipped_issue_rows(issue_rollups, issues)
@@ -607,12 +685,24 @@ def _assemble_outcomes(records, attrs, issue_rollups, issues, pr_rollups, prs, a
         "dead_end_usd": {"usd": dead_end["usd"], "note": dead_end["excluded_note"]},
     }
 
-    return {
+    total_usd = sum(r.get("cost_usd", 0) or 0 for r in records)
+    dead_end_share = (dead_end["usd"] / total_usd) if total_usd else None
+    validity = points_validity(rows, as_of=as_of)
+
+    payload = {
         "outcomes_as_of": outcomes_as_of,
         "tiles": tiles,
+        "dead_end_share": dead_end_share,
+        "validity": validity,
         "per_repo": per_repo_table(rows, as_of=as_of),
         "autonomy_trend": autonomy_trend(records, attrs, rows),
         "dead_end_list": dead_end["top"],
         "model_fit": model_fit_candidates(records, attrs, issues),
         "unattributed": unattributed_summary(records, attrs),
     }
+    if guide is not None:
+        payload["verdicts"] = outcome_verdicts(guide, tiles, dead_end_share, validity,
+                                               weekly_baselines(rows, as_of))
+    elif guide_error:
+        payload["verdicts_unavailable"] = guide_error
+    return payload

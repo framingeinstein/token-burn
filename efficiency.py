@@ -26,7 +26,9 @@ import subprocess
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from metric_guide import classify
 from parse import _jsonl_files, _mtime_floor, _read
+from prices import rate_for
 from usage_records import (factory_usage_records, local_usage_records, read_usage_records,
                            shared_repo_cache)
 
@@ -86,6 +88,55 @@ def context_growth_curve(bucket_totals):
     return curve
 
 
+def context_per_call(records):
+    """Headline context metric: `(in + cc + cr) / calls` -- tokens read per model
+    call across `records`; None when there are no calls."""
+    calls = sum(r.get("calls", 0) or 0 for r in records)
+    if not calls:
+        return None
+    ctx = sum((r.get("in", 0) or 0) + (r.get("cc", 0) or 0) + (r.get("cr", 0) or 0)
+              for r in records)
+    return ctx / calls
+
+
+_EARLY_BUCKETS = ("1", "2-5")
+_LATE_BUCKETS = ("21-50", "51+")
+
+
+def context_growth_ratio(bucket_totals):
+    """Weighted mean context of late calls (buckets 21-50, 51+) over early calls
+    (1, 2-5); None when either side has no calls (or the early mean is 0)."""
+    def mean(labels):
+        calls = sum((bucket_totals.get(l) or {}).get("calls", 0) for l in labels)
+        ctx = sum((bucket_totals.get(l) or {}).get("ctx", 0) for l in labels)
+        return ctx / calls if calls else None
+    early, late = mean(_EARLY_BUCKETS), mean(_LATE_BUCKETS)
+    if not early or late is None:
+        return None
+    return late / early
+
+
+def cost_mix(records, prices):
+    """$ and share of $ by token kind, priced exactly as `parse.cost_usd` does
+    (records only carry a total `cost_usd`): input, cache write (`write_mult`),
+    cache read (`read_mult`) at the model's input rate, output at its output
+    rate. Unpriced models contribute $0. Shares are None when total $ is 0."""
+    usd = {"cache_read": 0.0, "cache_write": 0.0, "output": 0.0, "input": 0.0}
+    for r in records:
+        rate = rate_for(prices, r.get("model"), r.get("day"))
+        if rate is None:
+            continue
+        usd["input"] += (r.get("in", 0) or 0) * rate["in"] / 1e6
+        usd["output"] += (r.get("out", 0) or 0) * rate["out"] / 1e6
+        usd["cache_write"] += (r.get("cc", 0) or 0) * rate["in"] * rate["write_mult"] / 1e6
+        usd["cache_read"] += (r.get("cr", 0) or 0) * rate["in"] * rate["read_mult"] / 1e6
+    total = sum(usd.values())
+    mix = {k: {"usd": v, "share": (v / total) if total else None}
+           for k, v in usd.items()}
+    mix["total_usd"] = total  # parts unrounded so they sum to the total exactly
+    return mix
+
+
 def daily_series(records):
     """One row per day: totals, cache hit rate and output share for that day."""
     by_day = collections.defaultdict(list)
@@ -103,20 +154,39 @@ def daily_series(records):
     return series
 
 
-def build_efficiency_payload(records):
+def build_efficiency_payload(records, prices=None, guide=None, guide_error=None):
     """The `efficiency` top-level payload key (Ruling R3): cache hit rate and
     output share (overall + per day), the context-growth curve, spend, and the
     "100% of spend" coverage this section always has by construction (spec
-    Sec3A) — model fit is NOT built here (moved to T5)."""
+    Sec3A) — model fit is NOT built here (moved to T5).
+
+    Additive (metric guide): `context_per_call`, `context_growth_ratio`, and —
+    when `prices` is given — `cost_mix`; `verdicts` when a `guide` is loaded
+    (else `verdicts_unavailable` carries `guide_error`)."""
     totals = sum_totals(records)
-    return {
+    buckets = sum_ctx_buckets(records)
+    payload = {
         "coverage_pct": 100.0,
         "spend_usd": round(spend_usd(records), 6),
         "cache_hit_rate": cache_hit_rate(totals),
         "output_share": output_share(totals),
         "days": daily_series(records),
-        "context_growth": context_growth_curve(sum_ctx_buckets(records)),
+        "context_growth": context_growth_curve(buckets),
+        "context_per_call": context_per_call(records),
+        "context_growth_ratio": context_growth_ratio(buckets),
     }
+    if prices is not None:
+        payload["cost_mix"] = cost_mix(records, prices)
+    if guide is not None:
+        payload["verdicts"] = {
+            mid: classify(guide, mid, payload[key]) for mid, key in (
+                ("cache_hit_rate", "cache_hit_rate"),
+                ("context_per_call", "context_per_call"),
+                ("context_growth", "context_growth_ratio"),
+                ("output_share", "output_share"))}
+    elif guide_error:
+        payload["verdicts_unavailable"] = guide_error
+    return payload
 
 
 # --- assembly: finalized archive (day < today) + live parse of today ---------

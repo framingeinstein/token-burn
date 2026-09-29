@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "notes": "Thresholds for every dashboard metric. Bands are data: lo/hi (null = unbounded) with explicit inclusive flags. Read by metric_guide.py (this dashboard and synkhos/factory#172). Edit here, no code change needed.",
+  "metrics": {
+    "cache_hit_rate": {
+      "kind": "banded",
+      "direction": "higher_is_better",
+      "label": "Cache hit rate",
+      "note": "a floor, not a target — 100% is not a goal (every turn adds new context)",
+      "meaning": "Share of input tokens served from the prompt cache; high means contexts are being reused instead of rebuilt.",
+      "action": "Contexts are being rebuilt — idle gaps past the 5-min cache TTL, changing early prompt content, or many tiny sessions.",
+      "bands": [
+        {"verdict": "good",  "lo": 0.95, "lo_inclusive": true,  "hi": null, "hi_inclusive": false},
+        {"verdict": "watch", "lo": 0.85, "lo_inclusive": true,  "hi": 0.95, "hi_inclusive": false},
+        {"verdict": "poor",  "lo": null, "lo_inclusive": false, "hi": 0.85, "hi_inclusive": false}
+      ]
+    },
+    "context_per_call": {
+      "kind": "banded",
+      "direction": "lower_is_better",
+      "label": "Context per call",
+      "note": "tokens read per model call: (input + cache write + cache read) / calls",
+      "meaning": "How much context each call re-reads; high means long sessions are dragging a big history through every turn.",
+      "action": "Each call re-reads a large context — 71% of spend was cache reads in late Sept. Start fresh sessions per task, compact earlier, push exploration into sub-agents.",
+      "bands": [
+        {"verdict": "good",  "lo": null,   "lo_inclusive": false, "hi": 80000,  "hi_inclusive": false},
+        {"verdict": "watch", "lo": 80000,  "lo_inclusive": true,  "hi": 150000, "hi_inclusive": true},
+        {"verdict": "poor",  "lo": 150000, "lo_inclusive": false, "hi": null,   "hi_inclusive": false}
+      ]
+    },
+    "context_growth": {
+      "kind": "banded",
+      "direction": "lower_is_better",
+      "label": "Context growth",
+      "note": "ratio of mean context on late calls (21+) to early calls (1-5) within a session",
+      "meaning": "How much bigger the context is late in a session than early; a high ratio means sessions run long past the point of useful history.",
+      "action": "Sessions are growing well past their early size — end sessions at natural task boundaries, /compact sooner, or restart with a short summary.",
+      "bands": [
+        {"verdict": "good",  "lo": null, "lo_inclusive": false, "hi": 1.5,  "hi_inclusive": true},
+        {"verdict": "watch", "lo": 1.5,  "lo_inclusive": false, "hi": 2.5,  "hi_inclusive": true},
+        {"verdict": "poor",  "lo": 2.5,  "lo_inclusive": false, "hi": null, "hi_inclusive": false}
+      ]
+    },
+    "output_share": {
+      "kind": "info",
+      "direction": "none",
+      "label": "Output share",
+      "note": "agentic work is naturally low; shown for context",
+      "meaning": "Share of all tokens that the model wrote; agentic work is naturally low because most tokens are re-read context.",
+      "action": ""
+    },
+    "durable_merge_rate": {
+      "kind": "banded",
+      "direction": "higher_is_better",
+      "label": "Durable-merge rate",
+      "note": "merged PRs with no revert or reopen within 14 days",
+      "meaning": "Share of merged PRs that stuck; low means work is being reverted or reopened.",
+      "action": "Merged work is being reverted or reopened — tighten review and tests before merging, and look at which PRs bounced back.",
+      "bands": [
+        {"verdict": "good",  "lo": 0.95, "lo_inclusive": true,  "hi": null, "hi_inclusive": false},
+        {"verdict": "watch", "lo": 0.90, "lo_inclusive": true,  "hi": 0.95, "hi_inclusive": false},
+        {"verdict": "poor",  "lo": null, "lo_inclusive": false, "hi": 0.90, "hi_inclusive": false}
+      ]
+    },
+    "rework_share": {
+      "kind": "banded",
+      "direction": "lower_is_better",
+      "label": "Rework share",
+      "note": "ci-fix and conflict $ over implementation $ (no data until synkhos/factory#109)",
+      "meaning": "How much spend goes into fixing CI and conflicts instead of building; high means the first attempt keeps failing.",
+      "action": "Too much spend goes to fixing what was just built — sharpen specs and acceptance checks so the first pass lands.",
+      "bands": [
+        {"verdict": "good",  "lo": null, "lo_inclusive": false, "hi": 0.15, "hi_inclusive": true},
+        {"verdict": "watch", "lo": 0.15, "lo_inclusive": false, "hi": 0.30, "hi_inclusive": true},
+        {"verdict": "poor",  "lo": 0.30, "lo_inclusive": false, "hi": null, "hi_inclusive": false}
+      ]
+    },
+    "dead_end_share": {
+      "kind": "banded",
+      "direction": "lower_is_better",
+      "label": "Dead-end share",
+      "note": "dead-end $ over total spend in the same (Me) scope",
+      "meaning": "Share of spend that went into work later closed not-planned or abandoned on a stale branch.",
+      "action": "Spend is going to work that never ships — kill doomed issues earlier and check scope before starting long sessions.",
+      "bands": [
+        {"verdict": "good",  "lo": null, "lo_inclusive": false, "hi": 0.05, "hi_inclusive": false},
+        {"verdict": "watch", "lo": 0.05, "lo_inclusive": true,  "hi": 0.15, "hi_inclusive": true},
+        {"verdict": "poor",  "lo": 0.15, "lo_inclusive": false, "hi": null, "hi_inclusive": false}
+      ]
+    },
+    "validity_rho": {
+      "kind": "banded",
+      "direction": "higher_is_better",
+      "label": "Points validity (rho)",
+      "note": "Spearman rho between complexity points and attributed $; fewer than 15 rated issues is always low confidence",
+      "meaning": "Whether bigger-point issues really cost more; high means the point ratings are trustworthy.",
+      "action": "Point ratings do not track cost — recalibrate the rater before trusting $/pt.",
+      "bands": [
+        {"verdict": "good",  "lo": 0.5,  "lo_inclusive": true,  "hi": null, "hi_inclusive": false},
+        {"verdict": "watch", "lo": 0.3,  "lo_inclusive": true,  "hi": 0.5,  "hi_inclusive": false},
+        {"verdict": "poor",  "lo": null, "lo_inclusive": false, "hi": 0.3,  "hi_inclusive": false}
+      ]
+    },
+    "cost_per_point": {
+      "kind": "relative",
+      "direction": "lower_is_better",
+      "tolerance": 0.10,
+      "label": "$ per point",
+      "note": "median $/pt in the latest ISO week with shipped rated issues vs the median of the 4 weeks before it",
+      "meaning": "What a complexity point costs now compared with the recent past; lower is better.",
+      "action": "$/pt is rising versus the last 4 weeks — check for dead ends, oversized sessions or model choice."
+    },
+    "throughput": {
+      "kind": "relative",
+      "direction": "higher_is_better",
+      "tolerance": 0.10,
+      "label": "Throughput",
+      "note": "points shipped in the latest ISO week with shipped rated issues vs the mean of the 4 weeks before it",
+      "meaning": "Points shipped compared with the recent weekly average; higher is better.",
+      "action": "Shipping has slowed versus the last 4 weeks — look for blocked issues or time lost to rework."
+    }
+  }
+}

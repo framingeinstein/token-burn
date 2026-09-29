@@ -660,3 +660,111 @@ def test_build_outcomes_payload_me_view_is_unchanged_by_the_scope_parameter_I6()
     assert payload["unattributed"]["total_usd"] == pytest.approx(3.0)
     assert payload["per_repo"][0]["points_shipped"] == 2
     assert payload["per_repo"][0]["cost_per_point"]["median"] == pytest.approx(1.5)
+
+
+# --- metric guide: weekly baselines, dead_end_share, verdicts -------------------------
+
+from metric_guide import load_guide
+from outcome_metrics import weekly_baselines
+
+
+def _row(closed, pts, usd, number=1):
+    return {"repo": "o/r", "number": number, "pts": pts, "closed_at": closed + "T12:00:00Z",
+            "attributed_usd": usd}
+
+
+def test_weekly_baselines_hand_computed():
+    # 2026-09-14..20 is ISO W38 (latest); W34..W37 are the 4 prior weeks.
+    rows = [
+        _row("2026-09-15", 2, 10.0, 1), _row("2026-09-16", 4, 8.0, 2),   # W38: $/pt 5, 2 ; pts 6
+        _row("2026-09-08", 2, 20.0, 3),                                   # W37: 10 ; pts 2
+        _row("2026-08-27", 1, 6.0, 4), _row("2026-08-27", 3, 6.0, 5),     # W35: 6, 2 ; pts 4
+        _row("2026-08-01", 1, 99.0, 6),                                   # W31: outside window
+        {"repo": "o/r", "number": 7, "pts": None, "closed_at": "2026-09-16T00:00:00Z",
+         "attributed_usd": 50.0},                                         # unrated: ignored
+    ]
+    b = weekly_baselines(rows, "2026-09-20")
+    assert b["week"] == "2026-W38"
+    assert b["cost_per_point"]["current"] == median([5.0, 2.0])         # 3.5
+    assert b["cost_per_point"]["baseline"] == median([10.0, 6.0, 2.0])  # 6.0
+    assert b["throughput"]["current"] == 6
+    assert b["throughput"]["baseline"] == (2 + 4) / 4                   # mean over 4 weeks, zeros count
+
+
+def test_weekly_baselines_empty_sides_are_none():
+    only_latest = [_row("2026-09-15", 2, 10.0)]
+    b = weekly_baselines(only_latest, "2026-09-20")
+    assert b["cost_per_point"]["baseline"] is None and b["throughput"]["baseline"] is None
+    assert b["cost_per_point"]["current"] == 5.0
+    empty = weekly_baselines([], "2026-09-20")
+    assert empty["week"] is None
+    assert empty["cost_per_point"] == {"current": None, "baseline": None}
+
+
+def test_weekly_baselines_ignores_weeks_after_as_of():
+    rows = [_row("2026-09-30", 2, 10.0), _row("2026-09-15", 2, 10.0)]
+    assert weekly_baselines(rows, "2026-09-20")["week"] == "2026-W38"
+
+
+def _guide_payload(records, issues=None, prs=None, guide=True, **kw):
+    return build_outcomes_payload(records, issues or [], prs or [], as_of="2026-09-15",
+                                  outcomes_as_of="x", scope="jason",
+                                  guide=load_guide() if guide else None, **kw)
+
+
+def test_dead_end_share_is_dead_end_over_scoped_spend():
+    records = [
+        usage_record(actor="human:jason", branch="feat/10-x", issue=None, cost_usd=90.0,
+                     day="2026-09-14"),
+        usage_record(actor="human:jason", branch="feat/dead", issue=None, cost_usd=10.0,
+                     day="2026-08-01"),
+        usage_record(actor="human:other", branch="feat/z", cost_usd=1000.0),   # not Me
+    ]
+    prs = [pr(number=30, head_ref="feat/dead", state="closed", merged_at=None, closes=[])]
+    p = _guide_payload(records, prs=prs)
+    assert p["tiles"]["dead_end_usd"]["usd"] == pytest.approx(10.0)
+    assert p["dead_end_share"] == pytest.approx(0.1)
+    assert p["verdicts"]["dead_end_share"]["verdict"] == "watch"
+
+
+def test_dead_end_share_none_without_spend():
+    p = _guide_payload([])
+    assert p["dead_end_share"] is None
+    assert p["verdicts"]["dead_end_share"]["verdict"] == "no_data"
+
+
+def test_outcomes_verdicts_cover_every_metric_and_null_degrades():
+    p = _guide_payload([usage_record(cost_usd=1.0)])
+    assert set(p["verdicts"]) == {"durable_merge_rate", "rework_share", "dead_end_share",
+                                  "validity_rho", "cost_per_point", "throughput"}
+    assert p["verdicts"]["durable_merge_rate"]["verdict"] == "no_data"
+    assert p["verdicts"]["rework_share"]["verdict"] == "no_data"
+    assert p["verdicts"]["validity_rho"]["verdict"] == "no_data"
+    assert p["verdicts"]["cost_per_point"]["comparison"] == "not_enough_data"
+    assert p["validity"]["n"] == 0
+
+
+def test_outcomes_durable_verdict_uses_the_rate():
+    records = [usage_record(branch="feat/10-x", cost_usd=1.0)]
+    issues = [issue(number=10, pts=2)]
+    prs = [pr(number=20, closes=[10])]
+    p = _guide_payload(records, issues, prs)
+    assert p["tiles"]["durable_merge_rate"]["rate"] == 1.0
+    assert p["verdicts"]["durable_merge_rate"]["verdict"] == "good"
+
+
+def test_validity_verdict_keeps_low_confidence_flag_for_small_n():
+    v = _guide_payload([usage_record()])["validity"]
+    assert v["badge"] is True                    # n < 15 -> existing warning semantics
+
+
+def test_no_guide_means_no_verdict_keys_but_dead_end_share_stays():
+    p = _guide_payload([usage_record()], guide=False, guide_error="missing")
+    assert "verdicts" not in p and p["verdicts_unavailable"] == "missing"
+    assert "dead_end_share" in p
+
+
+def test_unscoped_team_view_also_gets_verdicts():
+    p = build_outcomes_payload([usage_record()], [], [], as_of="2026-09-15",
+                               outcomes_as_of="x", scope=None, guide=load_guide())
+    assert "verdicts" in p
