@@ -89,7 +89,8 @@ completed day into an append-only local archive, `snapshots.jsonl`.
 
 ```bash
 python3 snapshot.py     # freeze completed days; run daily
-./install-cron.sh       # or install a 09:00 daily cron entry that does it for you
+./install-daily-launchd.sh  # macOS: a 09:00 LaunchAgent that runs run-daily.sh in your login session
+./install-cron.sh           # elsewhere: a 09:00 cron entry (cron can't read gh's macOS keychain token)
 ```
 
 The first run seeds everything still on disk; later runs catch up from the last recorded day.
@@ -132,7 +133,7 @@ ENV
 python3 snapshot.py                 # freezes factory days into factory-snapshots.jsonl
 ```
 
-`install-cron.sh` chains the sync before the daily snapshot. Factory usage is
+`run-daily.sh` (via `install-daily-launchd.sh`, or `install-cron.sh`) chains the sync before the daily snapshot. Factory usage is
 attributed from the bucket path as `factory:<runner>` (runners share a `/tmp/wt-N`
 cwd, so cwd can't be used), counts each `message.id` once across re-uploaded
 sessions, and lives in its own archive so backfilling it never re-derives your
@@ -195,6 +196,7 @@ for that reason — check before you share a build, a screenshot, or a snapshot 
 | Claude parsing, `build.sh`, `serve.py` | ✅ | ✅ | untested |
 | `install-cron.sh` | ✅ | ✅ | — |
 | `install-launchd.sh` | ✅ | — | — |
+| `install-daily-launchd.sh` | ✅ | — | — |
 | Cursor local activity | ✅ | `--cursor-db` | `--cursor-db` |
 
 `build.sh` opens the result automatically on macOS; elsewhere it prints the path.
