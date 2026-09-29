@@ -20,6 +20,7 @@ from prices import load_prices
 from ledger import assemble_rollup, today_str
 from cursor_local import read_cursor_activity
 from cursor_usage import load_cursor_usage
+from metric_guide import DEFAULT_PATH as DEFAULT_GUIDE_PATH, GuideError, load_guide
 from efficiency import build_efficiency_payload, collect_usage_records
 from usage_records import resolve_actor as resolve_usage_actor
 from outcomes import DEFAULT_CACHE_DIR, cache_paths, read_jsonl_latest, read_state
@@ -37,7 +38,17 @@ DEFAULT_CURSOR_DB = Path(
 ).expanduser()
 
 
-def build_outcomes_section(cache_dir, records, today, me_login):
+def load_metric_guide(cfg):
+    """(guide, error): `metric-guide.json` re-read per request so a threshold
+    edit shows on refresh. A missing/invalid file degrades to (None, reason) --
+    verdicts are simply absent, the rest of the page is unaffected."""
+    try:
+        return load_guide(cfg.get("guide_path") or DEFAULT_GUIDE_PATH), None
+    except GuideError as e:
+        return None, str(e)
+
+
+def build_outcomes_section(cache_dir, records, today, me_login, guide=None, guide_error=None):
     """The `outcomes` top-level payload key (controller ruling R3). serve.py
     only READS the outcome cache here -- never GitHub (spec Sec5.2: fetching
     is `outcomes.py`'s job, run out-of-band by cron). No cache yet (or no
@@ -60,7 +71,7 @@ def build_outcomes_section(cache_dir, records, today, me_login):
     prs = list(read_jsonl_latest(paths["prs"], lambda r: (r["repo"], r["number"])).values())
     payload = build_outcomes_payload(
         records, issues, prs, as_of=today, outcomes_as_of=state.get("outcomes_as_of"),
-        scope=me_login)
+        scope=me_login, guide=guide, guide_error=guide_error)
     payload["available"] = True
     return payload
 
@@ -114,9 +125,14 @@ def _build_payload(cfg, memo):
         cfg.get("actor"), today, factory_root=cfg.get("factory_root"),
         repo_map=cfg.get("repo_map"), memo=memo,
     )
-    payload["efficiency"] = build_efficiency_payload(usage_records)
+    guide, guide_error = load_metric_guide(cfg)
+    payload["metric_guide"] = ({"available": True, **guide} if guide is not None
+                               else {"available": False, "reason": guide_error})
+    payload["efficiency"] = build_efficiency_payload(
+        usage_records, prices=prices, guide=guide, guide_error=guide_error)
     payload["outcomes"] = build_outcomes_section(
-        cfg.get("outcomes_cache_dir"), usage_records, today, actor_login(cfg.get("actor")))
+        cfg.get("outcomes_cache_dir"), usage_records, today, actor_login(cfg.get("actor")),
+        guide=guide, guide_error=guide_error)
     payload["team_upload"] = build_team_upload_section(cfg)
     return payload
 

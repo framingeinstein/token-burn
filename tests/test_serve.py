@@ -288,3 +288,62 @@ def test_build_payload_fixture_scale_budget(tmp_path):
     assert cold_s < 5.0, f"cold build_payload {cold_s:.2f}s over the 5 s budget"
     assert memo.misses == misses              # warm: no file re-read or re-parsed
     assert warm_s < 5.0, f"warm build_payload {warm_s:.2f}s over the 5 s budget"
+
+
+# --- metric guide wiring ---
+
+def _guide_cfg(tmp_path, **over):
+    fixtures = Path(__file__).parent / "fixtures"
+    cfg = {"ledger": str(tmp_path / "none.jsonl"), "root": fixtures,
+           "tz": "UTC", "today": "2026-05-21",
+           "cursor_db": str(tmp_path / "missing.vscdb"),
+           "cursor_ledger": str(tmp_path / "missing.jsonl"),
+           "team_config": {}}
+    cfg.update(over)
+    return cfg
+
+
+def test_build_payload_carries_the_metric_guide_and_efficiency_verdicts(tmp_path):
+    payload = build_payload(_guide_cfg(tmp_path))
+    assert payload["metric_guide"]["available"] is True
+    assert payload["metric_guide"]["metrics"]["cache_hit_rate"]["direction"] == "higher_is_better"
+    eff = payload["efficiency"]
+    assert set(eff["verdicts"]) == {"cache_hit_rate", "context_per_call", "context_growth",
+                                    "output_share"}
+    assert eff["verdicts"]["context_per_call"]["verdict"] == "no_data"   # no records
+    assert "cost_mix" in eff and "context_per_call" in eff
+    # existing keys still present
+    assert eff["coverage_pct"] == 100.0 and eff["days"] == []
+
+
+def test_build_payload_missing_guide_degrades_with_reason(tmp_path):
+    payload = build_payload(_guide_cfg(tmp_path, guide_path=str(tmp_path / "nope.json")))
+    assert payload["metric_guide"]["available"] is False
+    assert "nope.json" in payload["metric_guide"]["reason"]
+    assert "verdicts" not in payload["efficiency"]
+    assert "nope.json" in payload["efficiency"]["verdicts_unavailable"]
+    assert "days" in payload                       # rest of the page data intact
+
+
+def test_build_payload_invalid_guide_degrades_with_reason(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"metrics": {"bogus": {}}}))
+    payload = build_payload(_guide_cfg(tmp_path, guide_path=str(bad)))
+    assert payload["metric_guide"]["available"] is False
+    assert "bogus" in payload["metric_guide"]["reason"]
+
+
+def test_build_outcomes_section_gets_verdicts(tmp_path):
+    from metric_guide import load_guide
+    paths = cache_paths(tmp_path / "oc")
+    paths["issues"].parent.mkdir(parents=True, exist_ok=True)
+    paths["issues"].touch()
+    paths["prs"].touch()
+    write_state(paths["state"], {"outcomes_as_of": "2026-09-15T00:00:00Z"})
+    sec = build_outcomes_section(tmp_path / "oc", [], "2026-09-15", "jason",
+                                 guide=load_guide())
+    assert sec["available"] is True and "dead_end_share" in sec
+    assert sec["verdicts"]["rework_share"]["verdict"] == "no_data"
+    sec = build_outcomes_section(tmp_path / "oc", [], "2026-09-15", "jason",
+                                 guide=None, guide_error="why")
+    assert sec["verdicts_unavailable"] == "why"
