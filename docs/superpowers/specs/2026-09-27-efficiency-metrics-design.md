@@ -235,6 +235,14 @@ token-burn stays the local and personal tool, and the reference implementation o
 
 The handoff brief for that session is `docs/handoffs/2026-09-27-synkhos-ops-dashboard.md`.
 
+## Amendment 2026-09-27 — uploads through a door; the factory fetches outcomes
+
+Ruled by Jason after the Synkhos plans (company-context `docs/plans/factory/2026-09-27-ops-efficiency-plan.md`, OD-1…OD-7):
+
+- **A-1 · Uploads.** Developer machines upload usage records through the factory's house-auth door (synkhos/factory#171, OD-4), not directly to the bucket. No developer needs a GCP account. This replaces the bucket upload in §5.1.
+- **A-2 · Outcome cache.** The factory produces the shared outcome cache itself as part of the snapshot job (synkhos/factory#172), using its own GitHub App (its own quota pool). The designated-fetcher-per-team design in §5.2 no longer applies to team data. token-burn's local outcome fetcher (T3) stays, for the personal dashboard only.
+- **A-3 · Team view.** The team view lives in the console's Factory → Efficiency view (lattice#403, OD-1). token-burn's team mode (T6) is **upload only**, plus a link to that view. The local dashboard keeps "Me", including the factory work the developer commissioned. §6.1's `Me | Team` scope and §6.4's Team section are superseded by the console view.
+
 ## 10. Testing
 
 TDD, the same style as the existing suite (stdlib, pytest, fixtures).
@@ -258,7 +266,7 @@ TDD, the same style as the existing suite (stdlib, pytest, fixtures).
 1. **token-burn A:** usage records + Efficiency section (no GitHub).
 2. **factory:** rating at filing + requester (R-1…R-11), then the backfill run (R-12). Planned and filed by the Synkhos session (handoff).
 3. **token-burn B/C:** GitHub client with quota floor, outcome cache, joins, Outcomes section.
-4. **token-burn team mode:** actor config, bucket upload, designated fetcher, Team section.
+4. **token-burn team mode:** actor config and upload through the factory door (Amendment A-1…A-3).
 5. **Synkhos ops dashboard:** per §9, planned by the Synkhos session.
 
 Steps 1 and 2 are independent and can run in parallel.
