@@ -451,7 +451,7 @@ function covLine(cov){
   return `covers ${cov.counted} of ${cov.total} (${cov.pct==null?'—':cov.pct+'%'})`;
 }
 function outcomeTile(value,label,cov,v){
-  return `<div style="min-width:160px"><strong>${value}</strong><div style="color:var(--muted);font-size:12px">${esc(label)}${verdictChip(v)}${dirLabel(v)}</div><div style="color:var(--muted);font-size:11px;margin-top:2px">${esc(covLine(cov))}</div></div>`;
+  return `<div style="min-width:160px"><strong>${value}</strong><div style="color:var(--muted);font-size:12px">${esc(label)}${verdictChip(v)}${dirLabel(v)}</div>${cov===null?'':`<div style="color:var(--muted);font-size:11px;margin-top:2px">${esc(covLine(cov))}</div>`}</div>`;
 }
 function validityBadge(v){
   if(!v || !v.badge) return '';

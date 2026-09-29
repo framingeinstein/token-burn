@@ -131,9 +131,9 @@ def cost_mix(records, prices):
         usd["cache_write"] += (r.get("cc", 0) or 0) * rate["in"] * rate["write_mult"] / 1e6
         usd["cache_read"] += (r.get("cr", 0) or 0) * rate["in"] * rate["read_mult"] / 1e6
     total = sum(usd.values())
-    mix = {k: {"usd": round(v, 6), "share": (v / total) if total else None}
+    mix = {k: {"usd": v, "share": (v / total) if total else None}
            for k, v in usd.items()}
-    mix["total_usd"] = round(total, 6)
+    mix["total_usd"] = total  # parts unrounded so they sum to the total exactly
     return mix
 
 
