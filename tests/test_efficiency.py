@@ -212,3 +212,91 @@ def test_collect_usage_records_includes_live_factory_today(tmp_path):
     records = collect_usage_records(tmp_path / "usage", tmp_path / "empty-root", "UTC", PRICES,
                                     "human:x", today="2026-05-21", factory_root=factory_root)
     assert any(r["actor"] == "factory:lattice" for r in records)
+
+
+# --- metric guide: context per call, context growth ratio, cost mix, verdicts ---
+
+from efficiency import context_growth_ratio, context_per_call, cost_mix
+from metric_guide import load_guide
+
+
+def test_context_per_call_hand_computed():
+    recs = [_rec(in_=10, cc=20, cr=70), _rec(in_=100, cc=0, cr=0)]
+    recs[0]["calls"] = 2
+    recs[1]["calls"] = 3
+    assert context_per_call(recs) == (100 + 100) / 5
+
+
+def test_context_per_call_none_without_calls():
+    assert context_per_call([]) is None
+    r = _rec(in_=5); r["calls"] = 0
+    assert context_per_call([r]) is None
+
+
+def test_context_growth_ratio_hand_computed():
+    buckets = {"1": {"calls": 2, "ctx": 200}, "2-5": {"calls": 2, "ctx": 400},
+               "6-20": {"calls": 5, "ctx": 99999},
+               "21-50": {"calls": 1, "ctx": 300}, "51+": {"calls": 3, "ctx": 1500}}
+    early = (200 + 400) / 4          # 150
+    late = (300 + 1500) / 4          # 450
+    assert context_growth_ratio(sum_ctx_buckets([_rec(buckets=buckets)])) == late / early
+
+
+def test_context_growth_ratio_none_when_a_side_is_empty():
+    only_early = {"1": {"calls": 1, "ctx": 10}}
+    only_late = {"51+": {"calls": 1, "ctx": 10}}
+    assert context_growth_ratio(sum_ctx_buckets([_rec(buckets=only_early)])) is None
+    assert context_growth_ratio(sum_ctx_buckets([_rec(buckets=only_late)])) is None
+    assert context_growth_ratio(sum_ctx_buckets([])) is None
+
+
+def test_cost_mix_hand_computed_and_sums_to_record_cost():
+    # opus-4-8: in $5/M, out $25/M, write 1.25x, read 0.10x
+    rec = _rec(in_=1_000_000, out=200_000, cc=400_000, cr=8_000_000)
+    from parse import cost_usd
+    rec["cost_usd"] = cost_usd(PRICES, rec["model"], rec["day"], 1_000_000, 200_000,
+                               400_000, 8_000_000)
+    mix = cost_mix([rec], PRICES)
+    assert mix["input"]["usd"] == 5.0
+    assert mix["output"]["usd"] == 5.0
+    assert mix["cache_write"]["usd"] == 2.5
+    assert mix["cache_read"]["usd"] == 4.0
+    parts = ("cache_read", "cache_write", "output", "input")
+    assert abs(sum(mix[k]["usd"] for k in parts) - rec["cost_usd"]) < 1e-6
+    assert abs(sum(mix[k]["share"] for k in parts) - 1.0) < 1e-9
+    assert mix["cache_read"]["share"] == 4.0 / 16.5
+
+
+def test_cost_mix_unpriced_or_empty_has_null_shares():
+    rec = _rec(in_=10, cr=10)
+    rec["model"] = "<synthetic>"
+    mix = cost_mix([rec], PRICES)
+    assert mix["total_usd"] == 0 and mix["cache_read"]["share"] is None
+    assert cost_mix([], PRICES)["input"]["share"] is None
+
+
+def test_payload_without_prices_or_guide_keeps_old_shape():
+    p = build_efficiency_payload([_rec(in_=1, cr=9, buckets={"1": {"calls": 1, "ctx": 10}})])
+    assert p["cache_hit_rate"] == 0.9 and p["context_per_call"] == 10.0
+    assert "cost_mix" not in p and "verdicts" not in p
+
+
+def test_payload_gains_verdicts_and_cost_mix_with_guide():
+    rec = _rec(in_=1_000, cc=1_000, cr=200_000, buckets={"1": {"calls": 1, "ctx": 10}})
+    rec["calls"] = 1
+    p = build_efficiency_payload([rec], prices=PRICES, guide=load_guide())
+    assert p["context_per_call"] == 202_000
+    assert p["verdicts"]["context_per_call"]["verdict"] == "poor"
+    assert p["verdicts"]["cache_hit_rate"]["verdict"] == "good"
+    assert p["verdicts"]["context_growth"]["verdict"] == "no_data"
+    assert p["verdicts"]["output_share"]["verdict"] == "info"
+    assert p["context_growth_ratio"] is None
+    assert set(p["cost_mix"]) >= {"cache_read", "cache_write", "output", "input"}
+    # existing keys untouched
+    assert p["spend_usd"] == round(rec["cost_usd"], 6) and p["coverage_pct"] == 100.0
+
+
+def test_payload_guide_unavailable_reason():
+    p = build_efficiency_payload([_rec(in_=1, cr=9)], prices=PRICES, guide=None,
+                                 guide_error="boom")
+    assert "verdicts" not in p and p["verdicts_unavailable"] == "boom"
