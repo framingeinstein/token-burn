@@ -107,3 +107,81 @@ def test_main_passes_this_machines_actor_to_the_team_upload(tmp_path, monkeypatc
     ])
     snapshot.main()
     assert seen["actor"] == "human:jason-m"
+
+
+def test_main_freezes_factory_days_without_test_runs_unless_configured(tmp_path, monkeypatch):
+    import json
+    import sys
+    import snapshot
+    import usage_records
+
+    monkeypatch.setattr(usage_records, "default_login", lambda *a, **k: None)
+    monkeypatch.setattr(snapshot, "load_team_config", lambda: None)
+    froot = tmp_path / "fac"
+    for rel, mid, out in (("factory/5/wb-factory-implement-ab12c/p.jsonl", "p1", 1),
+                          ("runner-a/42/wb-impl-factory-p96kr/t.jsonl", "t1", 10),
+                          ("sandbox/1/wb-impl-factory-zz9zz/s.jsonl", "s1", 100)):
+        p = froot / rel
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-05-21T12:00:00Z", "cwd": "/tmp/wt",
+            "message": {"id": mid, "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 1, "output_tokens": out}}}) + "\n")
+
+    def run(extra, ledger):
+        monkeypatch.setattr(sys, "argv", [
+            "snapshot.py", "--root", str(tmp_path / "nologs"), "--tz", "UTC",
+            "--ledger", str(tmp_path / "s.jsonl"), "--skip-cursor", "--skip-usage",
+            "--skip-team-upload", "--factory-root", str(froot),
+            "--factory-ledger", str(ledger), *extra])
+        snapshot.main()
+        return read_ledger(str(ledger))["2026-05-21"]
+
+    default = run([], tmp_path / "f1.jsonl")
+    assert default["bySource"]["factory:factory"]["out"] == 1 + 100   # runner-a excluded
+    custom = run(["--factory-test-folder", "sandbox"], tmp_path / "f2.jsonl")
+    assert custom["bySource"]["factory:factory"]["out"] == 1 + 10     # sandbox excluded
+
+
+def test_refinalize_only_factory_touches_only_the_factory_ledger(tmp_path, monkeypatch):
+    """The factory mirror keeps every file (late syncs undercount frozen days),
+    so factory days can be re-derived; local days cannot (raw logs deleted)."""
+    import json
+    import sys
+    import snapshot
+    import usage_records
+
+    monkeypatch.setattr(usage_records, "default_login", lambda *a, **k: None)
+    monkeypatch.setattr(snapshot, "load_team_config", lambda: None)
+    froot = tmp_path / "fac"
+    sess = froot / "factory" / "5" / "wb-factory-implement-ab12c" / "p.jsonl"
+    sess.parent.mkdir(parents=True)
+
+    def write(n):
+        sess.write_text("".join(json.dumps({
+            "type": "assistant", "timestamp": "2026-05-21T12:00:00Z", "cwd": "/tmp/wt",
+            "message": {"id": f"p{i}", "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 1, "output_tokens": 10}}}) + "\n"
+            for i in range(n)))
+
+    paths = {"ledger": tmp_path / "s.jsonl", "factory": tmp_path / "f.jsonl",
+             "usage": tmp_path / "usage"}
+
+    def run(*extra):
+        monkeypatch.setattr(sys, "argv", [
+            "snapshot.py", "--root", str(FIX), "--tz", "UTC",
+            "--ledger", str(paths["ledger"]), "--skip-cursor", "--skip-team-upload",
+            "--factory-root", str(froot), "--factory-ledger", str(paths["factory"]),
+            "--usage-dir", str(paths["usage"]), "--actor", "jason-m", *extra])
+        snapshot.main()
+
+    write(1)                                  # the mirror synced late: 1 of 3 turns
+    run()
+    assert read_ledger(str(paths["factory"]))["2026-05-21"]["msgs"] == 1
+    local_before = paths["ledger"].read_bytes()
+    usage_before = {p.name: p.read_bytes() for p in paths["usage"].iterdir()}
+    write(3)                                  # the rest arrives
+    run("--refinalize", "--only", "factory", "--since", "2026-05-01")
+    assert read_ledger(str(paths["factory"]))["2026-05-21"]["msgs"] == 3
+    assert paths["ledger"].read_bytes() == local_before
+    assert {p.name: p.read_bytes() for p in paths["usage"].iterdir()} == usage_before

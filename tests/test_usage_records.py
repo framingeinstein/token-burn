@@ -309,7 +309,13 @@ def test_missing_required_field_is_rejected():
 
 def test_bad_kind_enum_is_rejected():
     with pytest.raises(SchemaError):
-        validate_usage_record(_valid_record(kind="rework"))
+        validate_usage_record(_valid_record(kind="refactor"))
+
+
+@pytest.mark.parametrize("kind", ["interactive", "impl", "review", "rework", "ci-fix",
+                                  "conflict", "unknown"])
+def test_every_factory_turn_kind_is_valid(kind):
+    validate_usage_record(_valid_record(kind=kind))
 
 
 def test_bad_ctx_bucket_key_is_rejected():

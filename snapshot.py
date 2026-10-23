@@ -5,14 +5,21 @@ The first run on an empty ledger backfills the full log span still on disk;
 later runs add only missing days, so a missed run self-heals within retention.
   snapshot.py                                   # daily run AND first-run backfill
   snapshot.py --refinalize --since 2026-05-20   # re-freeze a date range (rate fix)
+  snapshot.py --refinalize --only factory --since 2026-09-01
+      # re-freeze ONLY the factory ledger from the mirror (which keeps every file,
+      # so late-synced turns are picked up); snapshots.jsonl, usage/ and the
+      # Cursor ledger are untouched. Local days can't be re-derived once Claude
+      # Code's retention has deleted their raw logs.
 """
 import argparse
+import functools
 import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from parse import (DEFAULT_FACTORY_ROOT, day_records, default_roots, factory_day_records,
                    _default_tz_name)
+from factory_layout import DEFAULT_FACTORY_TEST_FOLDERS
 from prices import load_prices
 from ledger import read_ledger, append_day, today_str
 from cursor_usage import (
@@ -76,20 +83,40 @@ def main():
     ap.add_argument("--factory-ledger",
                     default=str(Path(__file__).parent / "factory-snapshots.jsonl"))
     ap.add_argument("--skip-factory", action="store_true")
+    ap.add_argument("--factory-test-folder", action="append", default=None,
+                    help="factory mirror top folder (glob) holding test/dev harness runs, "
+                         "left out of the factory ledger (repeatable); default: "
+                         + ", ".join(DEFAULT_FACTORY_TEST_FOLDERS))
     ap.add_argument("--usage-dir", default=str(Path(__file__).parent / "usage"),
                     help="where finalized usage/<day>.jsonl records are written")
     ap.add_argument("--actor", default=None,
                     help="GitHub login for human:<login> usage records; default: gh api user")
     ap.add_argument("--skip-usage", action="store_true")
+    ap.add_argument("--only", choices=["factory"], default=None,
+                    help="run ONLY this pass: 'factory' freezes (with --refinalize, re-freezes) "
+                         "the factory ledger and leaves snapshots.jsonl, usage/ and the Cursor "
+                         "ledger untouched -- factory usage records are not rewritten")
     ap.add_argument("--team-upload-state", default=str(DEFAULT_TEAM_UPLOAD_STATE),
                     help="idempotence state for team-door uploads (T6)")
     ap.add_argument("--skip-team-upload", action="store_true")
     args = ap.parse_args()
+    only_factory = args.only == "factory"
+    if only_factory and args.skip_factory:
+        ap.error("--only factory and --skip-factory contradict each other")
 
     prices = load_prices()
     today = today_str(args.tz)
     since = args.since  # None => full span (the default catch-up behavior)
     roots = args.root or default_roots()
+    if not only_factory:
+        _local_pass(args, roots, prices, today, since)
+    _factory_pass(args, prices, today, since)
+    if only_factory:
+        return
+    _rest(args, roots, prices, today, since)
+
+
+def _local_pass(args, roots, prices, today, since):
     print(f"roots: {', '.join(str(r) for r in roots)}")
     added, days, meta, existing = run(roots, args.tz, args.ledger, prices, today,
                                       refinalize=args.refinalize, since=since)
@@ -105,14 +132,25 @@ def main():
         if oldest_log > _next_day(newest_led):
             print(f"  WARNING: gap — oldest log {oldest_log} is past ledger max {newest_led}; "
                   f"days between may have rolled off uncaptured.")
+
+
+def _factory_pass(args, prices, today, since):
     if not args.skip_factory and os.path.isdir(args.factory_root):
         f_added, _, f_meta, _ = run(args.factory_root, args.tz, args.factory_ledger, prices, today,
                                     refinalize=args.refinalize, since=since,
-                                    records=factory_day_records)
+                                    records=functools.partial(
+                                        factory_day_records,
+                                        test_folders=args.factory_test_folder))
         print(f"factory: +{f_added} day(s) from {args.factory_root}; "
               f"ledger now {len(read_ledger(args.factory_ledger))} day(s)")
         if f_meta.get("unpriced_models"):
             print(f"  factory unpriced models (cost=0): {f_meta['unpriced_models']}")
+    elif args.only == "factory":
+        print(f"factory: no mirror at {args.factory_root}; nothing to freeze")
+
+
+def _rest(args, roots, prices, today, since):
+    """Cursor, usage records and the team upload (skipped by --only factory)."""
     if not args.skip_cursor:
         token = token_from_env_or_file(path=args.cursor_token_file)
         if token:
@@ -147,7 +185,8 @@ def main():
                                 and os.path.isdir(args.factory_root) else None)
                 added_usage, failed_usage = run_usage(
                     roots, args.tz, args.usage_dir, actor, prices, today,
-                    factory_root=factory_root, refinalize=args.refinalize, since=since)
+                    factory_root=factory_root, refinalize=args.refinalize, since=since,
+                    factory_test_folders=args.factory_test_folder)
                 print(f"usage records: +{len(added_usage)} day(s) -> {args.usage_dir}")
                 for day, reason in sorted(failed_usage.items()):
                     print(f"  WARNING: usage records for {day} refused: {reason}")

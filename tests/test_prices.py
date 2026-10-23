@@ -38,3 +38,34 @@ def test_load_prices_reads_repo_table():
 
 def test_rate_for_none_model_is_none():
     assert rate_for(_table(), None, "2026-05-21") is None
+
+
+# --- repo table: Anthropic list prices (claude-api reference, cached 2026-10-06) ---
+
+import pytest
+
+
+@pytest.mark.parametrize("model,inp,out,read_mult", [
+    ("claude-opus-5-5", 4.0, 20.0, 0.05),
+    ("claude-opus-5-5-20261001", 4.0, 20.0, 0.05),
+    ("claude-fable-5-1", 10.0, 50.0, 0.025),
+    ("claude-mythos-5-1", 10.0, 50.0, 0.025),
+    ("claude-sonnet-5-5", 2.0, 10.0, 0.10),
+    ("claude-opus-5", 5.0, 25.0, 0.10),
+    ("claude-fable-5", 10.0, 50.0, 0.10),
+    ("claude-mythos-5", 10.0, 50.0, 0.10),
+    ("claude-sonnet-5", 2.0, 10.0, 0.10),
+    ("claude-haiku-4-5", 1.0, 5.0, 0.10),
+])
+def test_repo_table_rates(model, inp, out, read_mult):
+    r = rate_for(load_prices(), model, "2026-10-22")
+    assert (r["in"], r["out"]) == (inp, out)
+    assert r["read_mult"] == pytest.approx(read_mult)
+    assert r["write_mult"] == 1.25
+
+
+def test_repo_table_version_and_source():
+    p = load_prices()
+    assert p["version"] == "2026-10-22.1"     # bumped: haiku-5-5 added after 2026-10-22
+    assert any("bump" in n and "rates_version" in n for n in p["notes"])
+    assert p["source"] == "Anthropic list prices (claude-api reference, cached 2026-10-06)"

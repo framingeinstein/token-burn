@@ -77,7 +77,12 @@ is the number worth watching.
 
 Rates live in `prices.json` as a dated table (model id × date range, with a source). Cost is
 **frozen at capture time**, so correcting a rate never silently rewrites your history; re-price
-deliberately with `snapshot.py --refinalize --since YYYY-MM-DD`. Models with no known rate are
+deliberately with `python3 reprice.py --since YYYY-MM-DD` (a dry run that prints a per-day
+before/after table; add `--apply` to write, after it backs up each file it touches to
+`<file>.bak-reprice-<timestamp>`). It recomputes cost from the tokens already in the usage archive
+and corrects the ledgers by the difference, so it works for days whose raw logs Claude Code's
+retention has deleted — `snapshot.py --refinalize` re-parses logs and would lose those days. It is
+idempotent: a second `--apply` changes nothing. Models with no known rate are
 counted as `$0` and reported in `meta.unpriced_models` rather than being guessed at.
 
 ---
@@ -94,7 +99,9 @@ python3 snapshot.py     # freeze completed days; run daily
 ```
 
 The first run seeds everything still on disk; later runs catch up from the last recorded day.
-Finalized days are immutable — only *today* is ever parsed live.
+Finalized days are immutable — only days *after* the last finalized one (normally yesterday,
+before the 09:00 run, and today; at most 7) are parsed live, and the dashboard marks them
+"live — not yet frozen".
 
 **Your archive is yours.** `snapshots.jsonl` is gitignored and never leaves your machine. It
 contains your project names and session titles, so treat it the way you would the logs it came
@@ -106,8 +113,8 @@ from: do not commit it, and do not paste it into an issue.
 python3 serve.py        # http://127.0.0.1:8799
 ```
 
-Serves the dashboard with today's data merged live on every load: `/api/data` (archive + live
-today) and `/healthz`. Read-only — capture stays with `snapshot.py`. If the port is taken it
+Serves the dashboard with every unfinalized day merged live on every load: `/api/data` (archive +
+live days since the last finalized one) and `/healthz`. Read-only — capture stays with `snapshot.py`. If the port is taken it
 increments to the next free one and prints where it landed.
 
 On macOS, `./install-launchd.sh` supervises that server as a LaunchAgent
@@ -134,10 +141,20 @@ python3 snapshot.py                 # freezes factory days into factory-snapshot
 ```
 
 `run-daily.sh` (via `install-daily-launchd.sh`, or `install-cron.sh`) chains the sync before the daily snapshot. Factory usage is
-attributed from the bucket path as `factory:<runner>` (runners share a `/tmp/wt-N`
-cwd, so cwd can't be used), counts each `message.id` once across re-uploaded
-sessions, and lives in its own archive so backfilling it never re-derives your
-local days. The dashboard's "by source" bars split this machine from each runner.
+attributed from the bucket path (runners share a `/tmp/wt-N` cwd, so cwd can't be used —
+see `factory_layout.py`): the repo and turn kind come from the execution name
+(`wb-<repo>-<verb>-<id>` or the older `wb-<verb>-<repo>-<id>`), the actor is
+`factory:<repo>`, and the issue comes from the session's `gitBranch`, else the issue folder
+when the top folder is the repo. Sessions chunked as `<session>.parts/NNNNNN.jsonl` are one
+session. Each `message.id` counts once across re-uploaded sessions and parts, and factory
+usage lives in its own archive so backfilling it never re-derives your local days. Test/dev
+harness folders (`runner-*`, `signed-in-run`, `test-runner`; change with
+`--factory-test-folder`) are excluded from every metric and total and shown only as
+"factory test runs $" in the efficiency section. The mirror keeps every file, so a factory day
+frozen before its turns finished syncing can be re-frozen on its own with
+`python3 snapshot.py --refinalize --only factory --since YYYY-MM-DD` — it leaves `snapshots.jsonl`
+and `usage/` untouched (local days can't be re-derived once their raw logs are gone). The dashboard's "by source" bars split this
+machine from each factory repo.
 
 ## Cursor (optional)
 
@@ -218,7 +235,7 @@ Python 3.11–3.13 in CI.
 | File | Role |
 |---|---|
 | `parse.py` | logs → per-day rollups (owns the `message.id` dedup) |
-| `ledger.py` | archive read/append + merge of frozen history with live today |
+| `ledger.py` | archive read/append + merge of frozen history with the live, unfinalized days |
 | `prices.py` / `prices.json` | dated rate table; cost frozen at capture |
 | `snapshot.py` | daily capture entry point (idempotent, catches up) |
 | `serve.py` | stdlib HTTP server: `/`, `/api/data`, `/healthz` |

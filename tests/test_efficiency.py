@@ -300,3 +300,55 @@ def test_payload_guide_unavailable_reason():
     p = build_efficiency_payload([_rec(in_=1, cr=9)], prices=PRICES, guide=None,
                                  guide_error="boom")
     assert "verdicts" not in p and p["verdicts_unavailable"] == "boom"
+
+
+# --- every unfinalised day is live (not just today) ---
+
+def _log(root, day, mid, name=None):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{name or mid}.jsonl").write_text(json.dumps({
+        "type": "assistant", "timestamp": f"{day}T12:00:00Z", "cwd": "/nonexistent/x",
+        "message": {"id": mid, "model": "claude-sonnet-4-6",
+                    "usage": {"input_tokens": 1, "output_tokens": 5}}}) + "\n")
+
+
+def test_collect_usage_records_archive_two_days_back_parses_yesterday_live(tmp_path):
+    from efficiency import usage_live_since
+    usage_dir = tmp_path / "usage"
+    append_usage_records(usage_dir, "2026-10-20", [_rec(day="2026-10-20", session="frozen")])
+    logs = tmp_path / "logs"
+    _log(logs, "2026-10-21", "y1")
+    _log(logs, "2026-10-22", "t1")
+    records = collect_usage_records(usage_dir, [logs], "UTC", PRICES, "human:x",
+                                    today="2026-10-22")
+    assert {r["day"] for r in records} == {"2026-10-20", "2026-10-21", "2026-10-22"}
+    assert usage_live_since(usage_dir, "2026-10-22") == "2026-10-21"
+
+
+def test_collect_usage_records_archive_has_yesterday_only_today_live(tmp_path):
+    usage_dir = tmp_path / "usage"
+    append_usage_records(usage_dir, "2026-10-21", [_rec(day="2026-10-21", session="frozen")])
+    logs = tmp_path / "logs"
+    _log(logs, "2026-10-21", "y1")
+    _log(logs, "2026-10-22", "t1")
+    records = collect_usage_records(usage_dir, [logs], "UTC", PRICES, "human:x",
+                                    today="2026-10-22")
+    y = [r for r in records if r["day"] == "2026-10-21"]
+    assert [r["session"] for r in y] == ["frozen"]      # archive, not re-parsed
+
+
+def test_efficiency_daily_series_marks_live_days():
+    recs = [_rec(day="2026-10-20", in_=1), _rec(day="2026-10-21", in_=1)]
+    payload = build_efficiency_payload(recs, live_days=["2026-10-21"])
+    by = {d["date"]: d for d in payload["days"]}
+    assert by["2026-10-21"]["live"] is True
+    assert "live" not in by["2026-10-20"]
+
+
+def test_efficiency_payload_reports_factory_test_runs_separately():
+    prod = [_rec(cost=2.0)]
+    test = [_rec(cost=0.5, actor="factory:runner-a"), _rec(cost=0.25, actor="factory:test-runner")]
+    payload = build_efficiency_payload(prod, test_run_records=test)
+    assert payload["spend_usd"] == 2.0
+    assert payload["factory_test_runs_usd"] == 0.75
+    assert "factory_test_runs_usd" not in build_efficiency_payload(prod)

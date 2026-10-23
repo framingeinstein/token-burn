@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from factory_layout import attribute, expand_parts
 from prices import load_prices, rate_for
 
 
@@ -414,11 +415,16 @@ def day_records(root, tz_name, since=None, until=None, prices=None, memo=None):
 DEFAULT_FACTORY_ROOT = Path("~/.token-burn/factory-transcripts").expanduser()
 
 
-def factory_day_records(root, tz_name, since=None, until=None, prices=None, memo=None):
+def factory_day_records(root, tz_name, since=None, until=None, prices=None, memo=None,
+                        test_folders=None, repo_map=None):
     """Remote factory runner transcripts, mirrored from the bucket laid out as
-    {runner}/{issue}/{execution}/{session}.jsonl. Attribution comes from the path
-    (every runner's cwd is the same /tmp/wt-N), and a message.id counts once across
-    files because a re-run turn re-uploads the session under a new execution."""
+    {top}/{issue}/{execution}/{session}.jsonl (or chunked
+    {session}.parts/NNNNNN.jsonl). Attribution comes from the path
+    (`factory_layout.attribute` -- every runner's cwd is the same /tmp/wt-N):
+    a day's source/project is the actor, `factory:<repo>`. Test-run folders
+    (`factory_layout.DEFAULT_FACTORY_TEST_FOLDERS`, or `test_folders`) are
+    excluded. A message.id counts once across files because a re-run turn
+    re-uploads the session under a new execution (and parts overlap)."""
     if prices is None:
         prices = load_prices()
     tz = ZoneInfo(tz_name)
@@ -426,9 +432,12 @@ def factory_day_records(root, tz_name, since=None, until=None, prices=None, memo
 
     def sessions():
         seen = set()
-        for f in sorted(_jsonl_files(root, _mtime_floor(since, tz))):
+        for f in expand_parts(_jsonl_files(root, _mtime_floor(since, tz))):
             parts = Path(f).relative_to(root).parts
             if len(parts) < 2:
+                continue
+            attr = attribute(parts, repo_map=repo_map, test_folders=test_folders)
+            if attr["is_test"]:
                 continue
             s = _parse_file(f, tz, prices, memo)
             if s is None:
@@ -439,10 +448,10 @@ def factory_day_records(root, tz_name, since=None, until=None, prices=None, memo
                     continue
                 seen.add(m["id"])
                 fresh.append(m)
-            runner, issue = parts[0], parts[1]
             s["messages"] = fresh
-            s["project"] = s["source"] = f"factory:{runner}"
-            s["label"] = f"#{issue} {s['label']}"
+            s["project"] = s["source"] = attr["actor"]
+            if attr["folder_issue"] is not None:
+                s["label"] = f"#{attr['folder_issue']} {s['label']}"
             yield s
     if not root.is_dir():
         return _records(iter(()), tz_name, since, until, prices)

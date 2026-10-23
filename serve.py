@@ -1,7 +1,7 @@
 """Zero-dependency local server for the token-burn dashboard.
 
   /          -> dashboard.html (served so it fetches data live)
-  /api/data  -> assemble_rollup(archive + live today) as JSON
+  /api/data  -> assemble_rollup(archive + live unfinalized days) as JSON
   /healthz   -> ok
 
 Binds --port (default 8799); if taken, increments to the next free port and
@@ -21,7 +21,8 @@ from ledger import assemble_rollup, today_str
 from cursor_local import read_cursor_activity
 from cursor_usage import load_cursor_usage
 from metric_guide import DEFAULT_PATH as DEFAULT_GUIDE_PATH, GuideError, load_guide
-from efficiency import build_efficiency_payload, collect_usage_records
+from efficiency import build_efficiency_payload, collect_usage_records, usage_live_since
+from factory_layout import DEFAULT_FACTORY_TEST_FOLDERS, split_test_runs
 from usage_records import resolve_actor as resolve_usage_actor
 from outcomes import DEFAULT_CACHE_DIR, cache_paths, read_jsonl_latest, read_state
 from outcome_metrics import actor_login, build_outcomes_payload
@@ -115,6 +116,7 @@ def _build_payload(cfg, memo):
         factory_ledger_path=cfg.get("factory_ledger"),
         factory_root=cfg.get("factory_root"),
         memo=memo,
+        factory_test_folders=cfg.get("factory_test_folders"),
     )
     payload["cursor"] = {
         "local": read_cursor_activity(cfg["cursor_db"], cfg["tz"]),
@@ -124,12 +126,23 @@ def _build_payload(cfg, memo):
         cfg.get("usage_dir"), cfg.get("root") or default_roots(), cfg["tz"], prices,
         cfg.get("actor"), today, factory_root=cfg.get("factory_root"),
         repo_map=cfg.get("repo_map"), memo=memo,
+        factory_test_folders=cfg.get("factory_test_folders"),
     )
+    # factory test/dev harness runs are excluded from every metric and total,
+    # reported only as efficiency.factory_test_runs_usd
+    usage_records, test_run_records = split_test_runs(usage_records,
+                                                      cfg.get("factory_test_folders"))
     guide, guide_error = load_metric_guide(cfg)
     payload["metric_guide"] = ({"available": True, **guide} if guide is not None
                                else {"available": False, "reason": guide_error})
+    usage_since = usage_live_since(cfg.get("usage_dir"), today)
     payload["efficiency"] = build_efficiency_payload(
-        usage_records, prices=prices, guide=guide, guide_error=guide_error)
+        usage_records, prices=prices, guide=guide, guide_error=guide_error,
+        live_days=sorted({r["day"] for r in usage_records if r["day"] >= usage_since}),
+        test_run_records=test_run_records)
+    test_folders = cfg.get("factory_test_folders")
+    payload["efficiency"]["factory_test_folders"] = list(
+        DEFAULT_FACTORY_TEST_FOLDERS if test_folders is None else test_folders)
     payload["outcomes"] = build_outcomes_section(
         cfg.get("outcomes_cache_dir"), usage_records, today, actor_login(cfg.get("actor")),
         guide=guide, guide_error=guide_error)
@@ -203,6 +216,10 @@ def main():
     ap.add_argument("--team-upload-state", default=str(DEFAULT_TEAM_UPLOAD_STATE),
                     help="where the team-door upload-state file (written by "
                          "snapshot.py/team_upload.py) is read from -- never uploaded here")
+    ap.add_argument("--factory-test-folder", action="append", default=None,
+                    help="factory mirror top folder (glob) holding test/dev harness runs, "
+                         "excluded from metrics and totals (repeatable); default: "
+                         + ", ".join(DEFAULT_FACTORY_TEST_FOLDERS))
     ap.add_argument("--port", type=int, default=8799)
     args = ap.parse_args()
 
@@ -225,6 +242,7 @@ def main():
         "cursor_ledger": args.cursor_ledger,
         "factory_ledger": args.factory_ledger,
         "factory_root": args.factory_root,
+        "factory_test_folders": args.factory_test_folder,
         "usage_dir": args.usage_dir,
         "actor": actor,
         "outcomes_cache_dir": args.outcomes_cache_dir,

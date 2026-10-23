@@ -66,8 +66,8 @@
       "kind": "banded",
       "direction": "lower_is_better",
       "label": "Rework share",
-      "note": "ci-fix and conflict $ over implementation $ (no data until synkhos/factory#109)",
-      "meaning": "How much spend goes into fixing CI and conflicts instead of building; high means the first attempt keeps failing.",
+      "note": "ci-fix + conflict + rework $ over implementation $; review turns excluded (factory turn kind from the execution name)",
+      "meaning": "How much factory spend goes into fixing CI, conflicts and review feedback instead of building; high means the first attempt keeps failing. Review turns are counted on neither side; no data until a factory turn has a known kind.",
       "action": "Too much spend goes to fixing what was just built — sharpen specs and acceptance checks so the first pass lands.",
       "bands": [
         {"verdict": "good",  "lo": null, "lo_inclusive": false, "hi": 0.15, "hi_inclusive": true},

@@ -50,10 +50,11 @@ synkhos/factory#166, isn't built) -- $/pt coverage on real data will be near
 error (spec Sec8 "Missing, unrated or rater-error pts -> excluded from $/pt,
 included in coverage").
 
-Rework share (ci-fix/conflict $ over impl $) has NO DATA until the factory
-turn kind is known (synkhos/factory#109) -- `build_outcomes_payload`'s
-`tiles.rework_share` is always `{"share": None, ...}` with an explicit note,
-never a made-up number. Likewise "dead-end $" only ever counts issues closed
+Rework share = (ci-fix + conflict + rework) $ over impl $, from the factory
+turn kind the execution name carries (`factory_layout`); review turns are in
+neither side. While no factory record has a known kind it is NO DATA --
+`tiles.rework_share` is `{"share": None, ...}` with an explicit note, never a
+made-up number. Likewise "dead-end $" only ever counts issues closed
 `not_planned` and stale local branches (T4's own seams); factory
 timeouts/escalations have no data source yet and are named as excluded.
 """
@@ -76,8 +77,11 @@ _VALIDITY_WINDOW_DAYS = 90
 _VALIDITY_MIN_RHO = 0.3
 _VALIDITY_MIN_N = 15
 _DEAD_END_TOP_N = 10
-_REWORK_SHARE_NOTE = ("no data yet -- factory turn kind (impl/ci-fix/conflict) is unknown "
-                      "until synkhos/factory#109 lands")
+_REWORK_SHARE_NOTE = ("no data yet -- no factory turn with a known kind "
+                      "(impl/review/rework/ci-fix/conflict)")
+_REWORK_SHARE_DEF = ("(ci-fix + conflict + rework) $ over impl $; review turns excluded")
+_REWORK_KINDS = ("ci-fix", "conflict", "rework")
+_KNOWN_FACTORY_KINDS = ("impl", "review") + _REWORK_KINDS
 _DEAD_END_EXCLUDED_NOTE = ("factory turn timeouts/escalations have no data yet "
                            "(synkhos/factory#109); only issues closed not_planned and "
                            "stale local branches (no merged PR 14 days after the last "
@@ -116,6 +120,25 @@ def coverage(counted, total):
     at all to rate -- an honest "nothing to cover" distinct from "0% covered"."""
     return {"counted": counted, "total": total,
             "pct": round(100 * counted / total, 1) if total else None}
+
+
+# --- rework share ----------------------------------------------------------------------
+
+def rework_share(records):
+    """`(ci-fix + conflict + rework) $ / impl $` over the factory records (every
+    non-interactive one); review turns count toward neither side. `share` is
+    None when no factory record has a known kind (no data) or there is no impl
+    spend to divide by; `coverage` is factory records with a known kind."""
+    factory = [r for r in records if r.get("kind") != "interactive"]
+    known = [r for r in factory if r.get("kind") in _KNOWN_FACTORY_KINDS]
+    cov = coverage(len(known), len(factory))
+    if not known:
+        return {"share": None, "coverage": cov, "note": _REWORK_SHARE_NOTE}
+    usd = lambda kinds: sum(r.get("cost_usd", 0) or 0 for r in known if r["kind"] in kinds)
+    impl_usd, rework_usd = usd(("impl",)), usd(_REWORK_KINDS)
+    return {"share": (rework_usd / impl_usd) if impl_usd else None, "coverage": cov,
+            "impl_usd": round(impl_usd, 6), "rework_usd": round(rework_usd, 6),
+            "note": _REWORK_SHARE_DEF}
 
 
 # --- Spearman rho with ties (average-rank method) ---------------------------------------
@@ -681,7 +704,7 @@ def _assemble_outcomes(records, attrs, issue_rollups, issues, pr_rollups, prs, a
         "points_shipped_this_week": points_shipped_this_week(rows, as_of),
         "cost_per_point": cost_per_point_stats(rows),
         "durable_merge_rate": durable_merge_rate(pr_rollups),
-        "rework_share": {"share": None, "coverage": coverage(0, 0), "note": _REWORK_SHARE_NOTE},
+        "rework_share": rework_share(records),
         "dead_end_usd": {"usd": dead_end["usd"], "note": dead_end["excluded_note"]},
     }
 
