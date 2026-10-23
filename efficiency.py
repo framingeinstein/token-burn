@@ -158,7 +158,7 @@ def daily_series(records, live_days=()):
 
 
 def build_efficiency_payload(records, prices=None, guide=None, guide_error=None,
-                             live_days=()):
+                             live_days=(), test_run_records=None):
     """The `efficiency` top-level payload key (Ruling R3): cache hit rate and
     output share (overall + per day), the context-growth curve, spend, and the
     "100% of spend" coverage this section always has by construction (spec
@@ -166,7 +166,9 @@ def build_efficiency_payload(records, prices=None, guide=None, guide_error=None,
 
     Additive (metric guide): `context_per_call`, `context_growth_ratio`, and —
     when `prices` is given — `cost_mix`; `verdicts` when a `guide` is loaded
-    (else `verdicts_unavailable` carries `guide_error`)."""
+    (else `verdicts_unavailable` carries `guide_error`). `test_run_records`
+    (factory test-run folders, already excluded from `records`) are reported
+    only as `factory_test_runs_usd`, so excluded spend never silently vanishes."""
     totals = sum_totals(records)
     buckets = sum_ctx_buckets(records)
     payload = {
@@ -179,6 +181,8 @@ def build_efficiency_payload(records, prices=None, guide=None, guide_error=None,
         "context_per_call": context_per_call(records),
         "context_growth_ratio": context_growth_ratio(buckets),
     }
+    if test_run_records is not None:
+        payload["factory_test_runs_usd"] = round(spend_usd(test_run_records), 6)
     if prices is not None:
         payload["cost_mix"] = cost_mix(records, prices)
     if guide is not None:
@@ -216,7 +220,8 @@ def _finalized_usage_records(usage_dir, since):
 
 
 def _live_usage_records(roots, factory_root, tz_name, prices, actor, since, today,
-                        repo_map=None, run=None, repo_cache=None, memo=None):
+                        repo_map=None, run=None, repo_cache=None, memo=None,
+                        factory_test_folders=None):
     """`memo` (a `parse.SessionMemo`) shares one parse per file with the
     token/cost rollup's live pass and across requests; `repo_cache` (a
     `usage_records.RepoCache`) keeps git to one call per cwd (final review I3)."""
@@ -241,12 +246,14 @@ def _live_usage_records(roots, factory_root, tz_name, prices, actor, since, toda
                                            recs=recs))
     if factory_root and Path(factory_root).is_dir():
         records.extend(factory_usage_records(factory_root, tz_name, prices, repo_map=repo_map,
-                                             since=since, until=today, memo=memo))
+                                             since=since, until=today, memo=memo,
+                                             test_folders=factory_test_folders))
     return records
 
 
 def collect_usage_records(usage_dir, roots, tz_name, prices, actor, today,
-                          factory_root=None, repo_map=None, run=None, memo=None):
+                          factory_root=None, repo_map=None, run=None, memo=None,
+                          factory_test_folders=None):
     """Usage records for the efficiency payload: finalized usage/<day>.jsonl days
     (before the live window, authoritative) plus a live parse of every
     unfinalized day (`usage_live_since` .. today) — the same stitch
@@ -259,6 +266,7 @@ def collect_usage_records(usage_dir, roots, tz_name, prices, actor, today,
         repo_cache = shared_repo_cache(usage_dir)
         records.extend(_live_usage_records(
             roots, factory_root, tz_name, prices, actor, since, today, repo_map=repo_map,
-            run=run, repo_cache=repo_cache, memo=memo))
+            run=run, repo_cache=repo_cache, memo=memo,
+            factory_test_folders=factory_test_folders))
         repo_cache.save()
     return records

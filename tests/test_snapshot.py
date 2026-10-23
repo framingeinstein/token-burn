@@ -107,3 +107,37 @@ def test_main_passes_this_machines_actor_to_the_team_upload(tmp_path, monkeypatc
     ])
     snapshot.main()
     assert seen["actor"] == "human:jason-m"
+
+
+def test_main_freezes_factory_days_without_test_runs_unless_configured(tmp_path, monkeypatch):
+    import json
+    import sys
+    import snapshot
+    import usage_records
+
+    monkeypatch.setattr(usage_records, "default_login", lambda *a, **k: None)
+    monkeypatch.setattr(snapshot, "load_team_config", lambda: None)
+    froot = tmp_path / "fac"
+    for rel, mid, out in (("factory/5/wb-factory-implement-ab12c/p.jsonl", "p1", 1),
+                          ("runner-a/42/wb-impl-factory-p96kr/t.jsonl", "t1", 10),
+                          ("sandbox/1/wb-impl-factory-zz9zz/s.jsonl", "s1", 100)):
+        p = froot / rel
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-05-21T12:00:00Z", "cwd": "/tmp/wt",
+            "message": {"id": mid, "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 1, "output_tokens": out}}}) + "\n")
+
+    def run(extra, ledger):
+        monkeypatch.setattr(sys, "argv", [
+            "snapshot.py", "--root", str(tmp_path / "nologs"), "--tz", "UTC",
+            "--ledger", str(tmp_path / "s.jsonl"), "--skip-cursor", "--skip-usage",
+            "--skip-team-upload", "--factory-root", str(froot),
+            "--factory-ledger", str(ledger), *extra])
+        snapshot.main()
+        return read_ledger(str(ledger))["2026-05-21"]
+
+    default = run([], tmp_path / "f1.jsonl")
+    assert default["bySource"]["factory:factory"]["out"] == 1 + 100   # runner-a excluded
+    custom = run(["--factory-test-folder", "sandbox"], tmp_path / "f2.jsonl")
+    assert custom["bySource"]["factory:factory"]["out"] == 1 + 10     # sandbox excluded

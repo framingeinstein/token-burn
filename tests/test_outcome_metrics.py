@@ -768,3 +768,38 @@ def test_unscoped_team_view_also_gets_verdicts():
     p = build_outcomes_payload([usage_record()], [], [], as_of="2026-09-15",
                                outcomes_as_of="x", scope=None, guide=load_guide())
     assert "verdicts" in p
+
+
+# --- rework share: (ci-fix + conflict + rework) $ / impl $; review excluded ---
+
+from outcome_metrics import rework_share
+
+
+def _fac(kind, usd):
+    return usage_record(actor="factory:factory", kind=kind, branch=None, issue=10, cost_usd=usd)
+
+
+def test_rework_share_hand_computed_review_excluded():
+    recs = [_fac("impl", 10.0), _fac("impl", 10.0), _fac("ci-fix", 1.0), _fac("conflict", 1.0),
+            _fac("rework", 2.0), _fac("review", 50.0), usage_record(cost_usd=99.0)]
+    t = rework_share(recs)
+    assert t["share"] == pytest.approx(4.0 / 20.0)
+    assert t["rework_usd"] == pytest.approx(4.0) and t["impl_usd"] == pytest.approx(20.0)
+    assert t["coverage"] == {"counted": 6, "total": 6, "pct": 100.0}
+
+
+def test_rework_share_no_known_kind_is_no_data():
+    t = rework_share([_fac("unknown", 5.0), usage_record(cost_usd=1.0)])
+    assert t["share"] is None
+    assert "no data" in t["note"]
+    assert t["coverage"] == {"counted": 0, "total": 1, "pct": 0.0}
+
+
+def test_rework_share_without_impl_spend_is_none():
+    assert rework_share([_fac("rework", 1.0), _fac("review", 1.0)])["share"] is None
+
+
+def test_build_outcomes_payload_rework_tile_uses_scoped_factory_records():
+    recs = [_fac("impl", 10.0), _fac("rework", 3.0)]
+    p = build_outcomes_payload(recs, [], [], as_of="2026-09-15", outcomes_as_of=None, scope=None)
+    assert p["tiles"]["rework_share"]["share"] == pytest.approx(0.3)

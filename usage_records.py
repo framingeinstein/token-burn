@@ -6,8 +6,9 @@ pattern-constrained identifier — so a record is safe to leave the machine
 (uploaded to a team bucket, read by another consumer such as Synkhos).
 
 - `actor` is `human:<github-login>` for local sessions (the login is injectable/
-  configurable so no test ever calls the network) or `factory:<runner>` for
-  factory transcripts (runner from the bucket path).
+  configurable so no test ever calls the network) or `factory:<repo>` for
+  factory transcripts (`factory_layout`: repo from the execution name;
+  test-run folders keep `factory:<folder>`).
 - `branch` is taken PER MESSAGE from the transcript's own `gitBranch` (the
   branch checked out when that message was written -- final review C2), never
   from the cwd's checkout at snapshot time; one session that switched
@@ -18,12 +19,14 @@ pattern-constrained identifier — so a record is safe to leave the machine
   results to `<usage_dir>/repo-cache.json` -- so a worktree's remote captured
   while it existed still resolves after the worktree is deleted. A cwd with no
   git remote yields `repo: null`, never an error. `issue` comes from an
-  issue branch (`feat/<n>-...`, `<n>-...`, `<prefix>/<n>-...`), or from the factory bucket path via a runner -> repo
-  map (plan decision #5).
+  issue branch (`feat/<n>-...`, `<n>-...`, `<prefix>/<n>-...`); factory records
+  take it from the session's gitBranch too, else the bucket path's issue
+  folder when the top folder is the repo itself (`factory_layout`).
 - `on_behalf_of`/`requester_source` (the requester slot) are always null here;
   T4 fills them in from the issue.
-- `kind` is "interactive" for local sessions; factory turns are "unknown"
-  until factory#109 lands (Ruling R2).
+- `kind` is "interactive" for local sessions; factory turns take theirs from
+  the execution name's verb -- "impl", "review", "rework", "ci-fix",
+  "conflict" -- else "unknown" (`factory_layout.VERB_KINDS`).
 - ctx_buckets is `{bucket: {"calls": int, "ctx": int}}` (Ruling R1), bucketed by
   the call's ordinal position within the session (1, 2-5, 6-20, 21-50, 51+), so
   records can be summed across machines and context growth reported as a mean.
@@ -45,6 +48,8 @@ import threading
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from factory_layout import attribute, expand_parts
+from factory_layout import resolve_repo as _resolve_factory_repo
 from parse import _jsonl_files, _mtime_floor, _read, cost_usd, dedupe_messages, local_day, model_class
 
 SCHEMA_PATH = Path(__file__).parent / "schemas" / "usage-record.schema.json"
@@ -67,7 +72,6 @@ _ISSUE_BRANCH_RE = ISSUE_BRANCH_RE
 # would surface immediately as a validation failure in tests.
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 
-_FACTORY_REPO_OVERRIDES = {"terpsichore": "terpsichore-core"}
 
 
 def ctx_bucket_label(call_number):
@@ -247,15 +251,10 @@ def resolve_actor(config=None, get_login=default_login):
 # --- factory runner -> repo map (plan decision #5) --------------------------
 
 def resolve_factory_repo(runner, repo_map=None, org="synkhos"):
-    """Runner -> `org/repo`: one runner per repo, `wb-impl-<repo>` -> `org/<repo>`,
-    `terpsichore` -> `org/terpsichore-core`. `repo_map` overrides/extends this."""
-    if repo_map and runner in repo_map:
-        return repo_map[runner]
-    name = runner
-    if name.startswith("wb-impl-"):
-        name = name[len("wb-impl-"):]
-    name = _FACTORY_REPO_OVERRIDES.get(name, name)
-    return f"{org}/{name}"
+    """Runner/repo folder -> `org/repo`: `wb-impl-<repo>` -> `org/<repo>`,
+    `terpsichore` -> `org/terpsichore-core`. `repo_map` overrides/extends this.
+    (`factory_layout.resolve_repo`; kept here for existing callers.)"""
+    return _resolve_factory_repo(runner, repo_map, org)
 
 
 # --- record assembly (pure) -------------------------------------------------
@@ -307,7 +306,10 @@ def _build_records(entries, *, actor, repo, session_id, kind, issue=None,
         # Group on exactly the values that enter record_key (the sanitized
         # branch and the derived issue), so two raw branches that sanitize
         # alike can never yield two records sharing one key.
-        rec_issue = issue if issue is not None else issue_from_branch(raw_branch)
+        if "issue" in e:                       # resolved per entry by the caller (factory)
+            rec_issue = e["issue"]
+        else:
+            rec_issue = issue if issue is not None else issue_from_branch(raw_branch)
         groups[(d, e["model_class"], sanitize_branch(raw_branch), rec_issue)].append(e)
 
     records = []
@@ -360,25 +362,33 @@ def local_usage_records(file_path, raw_text, tz_name, prices, actor, run=subproc
 
 
 def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, until=None,
-                          memo=None):
+                          memo=None, test_folders=None):
     """Usage records for factory runner transcripts laid out
-    {runner}/{issue}/{execution}/{session}.jsonl. `kind` is always "unknown"
-    (Ruling R2, factory#109 not landed); `repo` from the runner map, `issue`
-    from the path. A message re-uploaded under a re-run execution counts once,
-    same convention as `parse.factory_day_records`.
+    {top}/{issue}/{execution}/{session}.jsonl or chunked
+    {session}.parts/NNNNNN.jsonl, attributed by `factory_layout.attribute`
+    (controller ruling 2026-10-22): `repo`/`kind` from the execution name,
+    `actor` `factory:<repo>`; `issue` from the session's gitBranch (issue-branch
+    pattern), else the folder number only when the top folder is the repo
+    itself. Records from test-run folders keep `actor: factory:<folder>` so
+    consumers can split them off (`factory_layout.split_test_runs`). A message
+    re-uploaded under a re-run execution (or repeated across parts) counts
+    once, same convention as `parse.factory_day_records`; every file of one
+    session is grouped into ONE set of records (no record_key collisions),
+    its calls numbered across all of them.
 
     Files last modified before `since`'s local midnight are skipped before
     reading (same `_mtime_floor` invariant `parse.day_records`/`factory_day_records`
     use: a file that old can't hold a message dated on/after `since`) — the
     factory transcript mirror can be large, and a narrow `since` (e.g. a live
-    "today" pass) would otherwise read and parse the whole tree on every call."""
+    "today" pass) would otherwise read and parse the whole tree on every call.
+    The other parts of a chunked session in the window are always read too."""
     tz = ZoneInfo(tz_name)
     root = Path(root)
     if not root.is_dir():
         return []
     seen_ids = set()
-    records = []
-    for f in sorted(_jsonl_files(root, _mtime_floor(since, tz))):
+    sessions = {}          # (actor, repo, kind, session) -> {"entries", "folder_issue"}
+    for f in expand_parts(_jsonl_files(root, _mtime_floor(since, tz))):
         parts = Path(f).relative_to(root).parts
         if len(parts) < 2:
             continue
@@ -392,24 +402,30 @@ def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, unti
             if raw is None:
                 continue
             recs = dedupe_messages(raw)
-        runner, issue_part = parts[0], parts[1]
-        issue = int(issue_part) if issue_part.isdigit() else None
-        repo = resolve_factory_repo(runner, repo_map)
-        entries = _call_entries(recs, tz, prices)
-        fresh = []
-        for e in entries:
+        attr = attribute(parts, repo_map=repo_map, test_folders=test_folders)
+        key = (attr["actor"], attr["repo"], attr["kind"], attr["session"])
+        group = sessions.setdefault(key, {"entries": [], "folder_issue": attr["folder_issue"]})
+        if group["folder_issue"] is None:
+            group["folder_issue"] = attr["folder_issue"]
+        for e in _call_entries(recs, tz, prices):
             mid = e["id"]
             if mid and mid in seen_ids:
                 continue
             if mid:
                 seen_ids.add(mid)
-            fresh.append(e)
-        for e in fresh:
+            group["entries"].append(e)
+    records = []
+    for (actor, repo, kind, session_id), group in sessions.items():
+        entries = group["entries"]
+        session_issue = next((i for i in (issue_from_branch(e["branch"]) for e in entries)
+                              if i is not None), None)
+        for n, e in enumerate(entries, 1):
+            e["call_number"] = n               # numbered across every file of the session
+            e["issue"] = issue_from_branch(e["branch"]) or session_issue or group["folder_issue"]
             e["branch"] = None                 # factory records carry no branch
-        session_id = Path(f).stem
         records.extend(_build_records(
-            fresh, actor=f"factory:{runner}", repo=repo, issue=issue,
-            session_id=session_id, kind="unknown", since=since, until=until))
+            entries, actor=actor, repo=repo, session_id=session_id, kind=kind,
+            since=since, until=until))
     return records
 
 
@@ -544,7 +560,8 @@ def read_usage_records(usage_dir, day):
 
 
 def run_usage(root, tz_name, usage_dir, actor, prices, today, factory_root=None,
-             refinalize=False, since=None, repo_map=None, run=subprocess.run):
+             refinalize=False, since=None, repo_map=None, run=subprocess.run,
+             factory_test_folders=None):
     """Build and append usage records for every finalized day (date < today), the
     same idempotent/--refinalize convention as snapshot.run: a day already
     present in usage/<day>.jsonl is left alone unless `refinalize`, in which
@@ -570,7 +587,7 @@ def run_usage(root, tz_name, usage_dir, actor, prices, today, factory_root=None,
     repo_cache.save()
     if factory_root and Path(factory_root).is_dir():
         for r in factory_usage_records(factory_root, tz_name, prices, repo_map=repo_map,
-                                       since=since):
+                                       since=since, test_folders=factory_test_folders):
             by_day[r["day"]].append(r)
 
     added, failed = set(), {}

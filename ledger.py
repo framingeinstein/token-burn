@@ -120,12 +120,15 @@ def _stitch(ledger, live_days, since):
 
 
 def assemble_rollup(ledger_path, root, tz_name, today, prices=None,
-                    factory_ledger_path=None, factory_root=None, memo=None):
+                    factory_ledger_path=None, factory_root=None, memo=None,
+                    factory_test_folders=None):
     """Merge finalized archive days (authoritative) with a live parse of every
     unfinalized day (`live_since` .. today, each marked `"live": true`), for
     local Claude Code stores and (optionally) the remote factory runners'
     separate archive -- each archive with its own live window. Returns the
-    dashboard payload {meta, days}. `memo` (a `parse.SessionMemo`) shares the
+    dashboard payload {meta, days}. Factory test-run folders
+    (`factory_test_folders`, default `factory_layout.DEFAULT_FACTORY_TEST_FOLDERS`)
+    are left out of the live factory parse. `memo` (a `parse.SessionMemo`) shares the
     live parse with other passes and requests; it never changes the result."""
     if prices is None:
         prices = load_prices()
@@ -139,7 +142,8 @@ def assemble_rollup(ledger_path, root, tz_name, today, prices=None,
         fac_ledger = read_ledger(factory_ledger_path or "")
         fac_since = live_since(fac_ledger, today)
         fac_live, fac_meta = ([], {}) if not factory_root else factory_day_records(
-            factory_root, tz_name, since=fac_since, until=today, prices=prices, memo=memo)
+            factory_root, tz_name, since=fac_since, until=today, prices=prices, memo=memo,
+            test_folders=factory_test_folders)
         live_dates |= {d["date"] for d in fac_live}
         fac = _stitch(fac_ledger, _mark_live(fac_live), fac_since)
         for d, rec in fac.items():

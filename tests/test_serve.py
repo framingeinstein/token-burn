@@ -385,3 +385,41 @@ def test_build_payload_marks_yesterday_and_today_live_and_memo_stays_warm(tmp_pa
     assert misses == 2
     build_payload(cfg)
     assert memo.misses == misses               # warm: nothing re-read
+
+
+# --- factory test-run folders: excluded from metrics/totals, reported apart ---
+
+def _fac_session(path, day, mid, out=1000):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "type": "assistant", "timestamp": f"{day}T12:00:00Z", "cwd": "/tmp/wt-1",
+        "message": {"id": mid, "model": "claude-sonnet-5",
+                    "usage": {"input_tokens": 0, "output_tokens": out}}}) + "\n")
+
+
+def _fac_cfg(tmp_path, today, **over):
+    froot = tmp_path / "fac"
+    _fac_session(froot / "factory" / "5" / "wb-factory-implement-ab12c" / "p.jsonl", today, "p1")
+    _fac_session(froot / "runner-a" / "42" / "wb-impl-factory-p96kr" / "t.jsonl", today, "t1")
+    cfg = _memo_cfg(tmp_path, tmp_path / "nologs", today)
+    cfg.update(factory_root=str(froot), factory_ledger=str(tmp_path / "fl.jsonl"), **over)
+    return cfg
+
+
+def test_build_payload_excludes_factory_test_runs_but_reports_their_cost(tmp_path):
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    payload = build_payload(_fac_cfg(tmp_path, today))
+    usd = 1000 * 10.0 / 1e6                     # sonnet-5 output rate
+    assert payload["efficiency"]["spend_usd"] == pytest.approx(usd)
+    assert payload["efficiency"]["factory_test_runs_usd"] == pytest.approx(usd)
+    assert payload["meta"]["totals"]["cost_usd"] == pytest.approx(usd)
+    assert set(payload["days"][-1]["bySource"]) == {"factory:factory"}
+
+
+def test_build_payload_factory_test_folders_configurable(tmp_path):
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    payload = build_payload(_fac_cfg(tmp_path, today, factory_test_folders=[]))
+    usd = 1000 * 10.0 / 1e6
+    assert payload["efficiency"]["spend_usd"] == pytest.approx(2 * usd)
+    assert payload["efficiency"]["factory_test_runs_usd"] == 0
+    assert payload["meta"]["totals"]["cost_usd"] == pytest.approx(2 * usd)

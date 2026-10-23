@@ -343,3 +343,12 @@ def test_efficiency_daily_series_marks_live_days():
     by = {d["date"]: d for d in payload["days"]}
     assert by["2026-10-21"]["live"] is True
     assert "live" not in by["2026-10-20"]
+
+
+def test_efficiency_payload_reports_factory_test_runs_separately():
+    prod = [_rec(cost=2.0)]
+    test = [_rec(cost=0.5, actor="factory:runner-a"), _rec(cost=0.25, actor="factory:test-runner")]
+    payload = build_efficiency_payload(prod, test_run_records=test)
+    assert payload["spend_usd"] == 2.0
+    assert payload["factory_test_runs_usd"] == 0.75
+    assert "factory_test_runs_usd" not in build_efficiency_payload(prod)

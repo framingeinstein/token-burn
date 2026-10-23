@@ -438,6 +438,7 @@ function drawEfficiency(){
   html+=effTile(fmtPct(eff.output_share), 'output share (overall)', V.output_share, 'agentic work is naturally low; shown for context');
   html+=effTile('$'+eff.spend_usd.toFixed(2), 'spend behind this section', null, '');
   html+='</div>';
+  if(eff.factory_test_runs_usd!=null) html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:8px">factory test runs $${eff.factory_test_runs_usd.toFixed(2)} — test/dev harness folders (runner-*, signed-in-run, test-runner), excluded from every metric and total</div>`;
   if(eff.verdicts_unavailable) html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:8px">verdicts unavailable — ${esc(eff.verdicts_unavailable)}</div>`;
   html+=drawCostMix(eff.cost_mix);
   html+='<div style="color:var(--muted);font-size:12px;margin:14px 0 4px">cache hit rate over time</div>';
@@ -478,7 +479,7 @@ function drawOutcomes(){
   html+=outcomeTile(t.points_shipped_this_week.points, 'points shipped this week', t.points_shipped_this_week.coverage, OV.throughput);
   html+=outcomeTile(t.cost_per_point.median==null?'—':`${fmtUsd(t.cost_per_point.median)} (p90 ${fmtUsd(t.cost_per_point.p90)})`, '$/pt median (p90)', t.cost_per_point.coverage, OV.cost_per_point);
   html+=outcomeTile(fmtPct(t.durable_merge_rate.rate), 'durable-merge rate', t.durable_merge_rate.coverage, OV.durable_merge_rate);
-  html+=outcomeTile('—', 'rework share', t.rework_share.coverage, OV.rework_share);
+  html+=outcomeTile(fmtPct(t.rework_share.share), 'rework share', t.rework_share.coverage, OV.rework_share);
   html+=outcomeTile(fmtUsd(t.dead_end_usd.usd), 'dead-end $', null);
   html+=outcomeTile(fmtPct(out.dead_end_share), 'dead-end share of spend', null, OV.dead_end_share);
   html+=outcomeTile(out.validity&&out.validity.rho!=null?out.validity.rho.toFixed(2):'—', `points validity ρ (n=${out.validity?out.validity.n:0})`, null, OV.validity_rho);

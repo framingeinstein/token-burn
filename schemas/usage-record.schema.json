@@ -33,7 +33,7 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["interactive", "impl", "ci-fix", "conflict", "unknown"]
+      "enum": ["interactive", "impl", "review", "rework", "ci-fix", "conflict", "unknown"]
     },
     "calls": {"type": "integer", "minimum": 0},
     "in": {"type": "integer", "minimum": 0},

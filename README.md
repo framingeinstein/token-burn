@@ -136,10 +136,17 @@ python3 snapshot.py                 # freezes factory days into factory-snapshot
 ```
 
 `run-daily.sh` (via `install-daily-launchd.sh`, or `install-cron.sh`) chains the sync before the daily snapshot. Factory usage is
-attributed from the bucket path as `factory:<runner>` (runners share a `/tmp/wt-N`
-cwd, so cwd can't be used), counts each `message.id` once across re-uploaded
-sessions, and lives in its own archive so backfilling it never re-derives your
-local days. The dashboard's "by source" bars split this machine from each runner.
+attributed from the bucket path (runners share a `/tmp/wt-N` cwd, so cwd can't be used —
+see `factory_layout.py`): the repo and turn kind come from the execution name
+(`wb-<repo>-<verb>-<id>` or the older `wb-<verb>-<repo>-<id>`), the actor is
+`factory:<repo>`, and the issue comes from the session's `gitBranch`, else the issue folder
+when the top folder is the repo. Sessions chunked as `<session>.parts/NNNNNN.jsonl` are one
+session. Each `message.id` counts once across re-uploaded sessions and parts, and factory
+usage lives in its own archive so backfilling it never re-derives your local days. Test/dev
+harness folders (`runner-*`, `signed-in-run`, `test-runner`; change with
+`--factory-test-folder`) are excluded from every metric and total and shown only as
+"factory test runs $" in the efficiency section. The dashboard's "by source" bars split this
+machine from each factory repo.
 
 ## Cursor (optional)
 

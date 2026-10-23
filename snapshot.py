@@ -7,12 +7,14 @@ later runs add only missing days, so a missed run self-heals within retention.
   snapshot.py --refinalize --since 2026-05-20   # re-freeze a date range (rate fix)
 """
 import argparse
+import functools
 import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from parse import (DEFAULT_FACTORY_ROOT, day_records, default_roots, factory_day_records,
                    _default_tz_name)
+from factory_layout import DEFAULT_FACTORY_TEST_FOLDERS
 from prices import load_prices
 from ledger import read_ledger, append_day, today_str
 from cursor_usage import (
@@ -76,6 +78,10 @@ def main():
     ap.add_argument("--factory-ledger",
                     default=str(Path(__file__).parent / "factory-snapshots.jsonl"))
     ap.add_argument("--skip-factory", action="store_true")
+    ap.add_argument("--factory-test-folder", action="append", default=None,
+                    help="factory mirror top folder (glob) holding test/dev harness runs, "
+                         "left out of the factory ledger (repeatable); default: "
+                         + ", ".join(DEFAULT_FACTORY_TEST_FOLDERS))
     ap.add_argument("--usage-dir", default=str(Path(__file__).parent / "usage"),
                     help="where finalized usage/<day>.jsonl records are written")
     ap.add_argument("--actor", default=None,
@@ -108,7 +114,9 @@ def main():
     if not args.skip_factory and os.path.isdir(args.factory_root):
         f_added, _, f_meta, _ = run(args.factory_root, args.tz, args.factory_ledger, prices, today,
                                     refinalize=args.refinalize, since=since,
-                                    records=factory_day_records)
+                                    records=functools.partial(
+                                        factory_day_records,
+                                        test_folders=args.factory_test_folder))
         print(f"factory: +{f_added} day(s) from {args.factory_root}; "
               f"ledger now {len(read_ledger(args.factory_ledger))} day(s)")
         if f_meta.get("unpriced_models"):
@@ -147,7 +155,8 @@ def main():
                                 and os.path.isdir(args.factory_root) else None)
                 added_usage, failed_usage = run_usage(
                     roots, args.tz, args.usage_dir, actor, prices, today,
-                    factory_root=factory_root, refinalize=args.refinalize, since=since)
+                    factory_root=factory_root, refinalize=args.refinalize, since=since,
+                    factory_test_folders=args.factory_test_folder)
                 print(f"usage records: +{len(added_usage)} day(s) -> {args.usage_dir}")
                 for day, reason in sorted(failed_usage.items()):
                     print(f"  WARNING: usage records for {day} refused: {reason}")
