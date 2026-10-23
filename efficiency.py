@@ -16,8 +16,8 @@ tokens, or an empty bucket); they return `None` rather than raising or
 pretending 0.
 
 `collect_usage_records` stitches finalized usage/<day>.jsonl archive days
-(day < today) with a live parse of today, the same way `ledger.assemble_rollup`
-stitches the snapshots ledger with a live parse of today (spec Sec5.3 "dashboard
+with a live parse of every unfinalized day (`ledger.live_since` .. today), the
+same way `ledger.assemble_rollup` stitches the snapshots ledger (spec Sec5.3 "dashboard
 build time" joins) — pure with respect to its inputs; the only IO is the
 filesystem/git reads `usage_records.local_usage_records` already does.
 """
@@ -26,6 +26,7 @@ import subprocess
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ledger import live_since
 from metric_guide import classify
 from parse import _jsonl_files, _mtime_floor, _read
 from prices import rate_for
@@ -137,8 +138,9 @@ def cost_mix(records, prices):
     return mix
 
 
-def daily_series(records):
-    """One row per day: totals, cache hit rate and output share for that day."""
+def daily_series(records, live_days=()):
+    """One row per day: totals, cache hit rate and output share for that day;
+    a day in `live_days` (parsed live, not yet frozen) carries `"live": true`."""
     by_day = collections.defaultdict(list)
     for r in records:
         by_day[r["day"]].append(r)
@@ -150,11 +152,13 @@ def daily_series(records):
             "in": totals["in"], "out": totals["out"], "cc": totals["cc"], "cr": totals["cr"],
             "cache_hit_rate": cache_hit_rate(totals),
             "output_share": output_share(totals),
+            **({"live": True} if day in live_days else {}),
         })
     return series
 
 
-def build_efficiency_payload(records, prices=None, guide=None, guide_error=None):
+def build_efficiency_payload(records, prices=None, guide=None, guide_error=None,
+                             live_days=()):
     """The `efficiency` top-level payload key (Ruling R3): cache hit rate and
     output share (overall + per day), the context-growth curve, spend, and the
     "100% of spend" coverage this section always has by construction (spec
@@ -170,7 +174,7 @@ def build_efficiency_payload(records, prices=None, guide=None, guide_error=None)
         "spend_usd": round(spend_usd(records), 6),
         "cache_hit_rate": cache_hit_rate(totals),
         "output_share": output_share(totals),
-        "days": daily_series(records),
+        "days": daily_series(records, set(live_days)),
         "context_growth": context_growth_curve(buckets),
         "context_per_call": context_per_call(records),
         "context_growth_ratio": context_growth_ratio(buckets),
@@ -189,30 +193,36 @@ def build_efficiency_payload(records, prices=None, guide=None, guide_error=None)
     return payload
 
 
-# --- assembly: finalized archive (day < today) + live parse of today ---------
+# --- assembly: finalized archive + live parse of every unfinalized day -------
 
-def _finalized_usage_records(usage_dir, today):
-    if not usage_dir:
+def _archive_days(usage_dir):
+    if not usage_dir or not Path(usage_dir).is_dir():
         return []
-    usage_dir = Path(usage_dir)
-    if not usage_dir.is_dir():
-        return []
+    return [p.stem for p in Path(usage_dir).glob("*.jsonl")]
+
+
+def usage_live_since(usage_dir, today):
+    """First live day for the usage-record pass: the day after the archive's
+    last finalized usage/<day>.jsonl (capped, `ledger.live_since`)."""
+    return live_since(_archive_days(usage_dir), today)
+
+
+def _finalized_usage_records(usage_dir, since):
     records = []
-    for p in usage_dir.glob("*.jsonl"):
-        day = p.stem
-        if day < today:
+    for day in _archive_days(usage_dir):
+        if day < since:
             records.extend(read_usage_records(usage_dir, day))
     return records
 
 
-def _live_today_usage_records(roots, factory_root, tz_name, prices, actor, today,
-                              repo_map=None, run=None, repo_cache=None, memo=None):
+def _live_usage_records(roots, factory_root, tz_name, prices, actor, since, today,
+                        repo_map=None, run=None, repo_cache=None, memo=None):
     """`memo` (a `parse.SessionMemo`) shares one parse per file with the
     token/cost rollup's live pass and across requests; `repo_cache` (a
     `usage_records.RepoCache`) keeps git to one call per cwd (final review I3)."""
     run = run or subprocess.run
     tz = ZoneInfo(tz_name)
-    floor = _mtime_floor(today, tz)
+    floor = _mtime_floor(since, tz)
     if repo_cache is None:
         repo_cache = {}
     records = []
@@ -227,26 +237,28 @@ def _live_today_usage_records(roots, factory_root, tz_name, prices, actor, today
             if raw is None:
                 continue
         records.extend(local_usage_records(f, raw, tz_name, prices, actor, run=run,
-                                           repo_cache=repo_cache, since=today, until=today,
+                                           repo_cache=repo_cache, since=since, until=today,
                                            recs=recs))
     if factory_root and Path(factory_root).is_dir():
         records.extend(factory_usage_records(factory_root, tz_name, prices, repo_map=repo_map,
-                                             since=today, until=today, memo=memo))
+                                             since=since, until=today, memo=memo))
     return records
 
 
 def collect_usage_records(usage_dir, roots, tz_name, prices, actor, today,
                           factory_root=None, repo_map=None, run=None, memo=None):
     """Usage records for the efficiency payload: finalized usage/<day>.jsonl days
-    (day < today, authoritative) plus a live parse of today — the same stitch
+    (before the live window, authoritative) plus a live parse of every
+    unfinalized day (`usage_live_since` .. today) — the same stitch
     `ledger.assemble_rollup` does for the token/cost rollup. `actor` is None when
-    no GitHub login is configured; the live-today pass is skipped (nothing to
+    no GitHub login is configured; the live pass is skipped (nothing to
     attribute it to) but the finalized archive still reads."""
-    records = _finalized_usage_records(usage_dir, today)
+    since = usage_live_since(usage_dir, today)
+    records = _finalized_usage_records(usage_dir, since)
     if actor:
         repo_cache = shared_repo_cache(usage_dir)
-        records.extend(_live_today_usage_records(
-            roots, factory_root, tz_name, prices, actor, today, repo_map=repo_map, run=run,
-            repo_cache=repo_cache, memo=memo))
+        records.extend(_live_usage_records(
+            roots, factory_root, tz_name, prices, actor, since, today, repo_map=repo_map,
+            run=run, repo_cache=repo_cache, memo=memo))
         repo_cache.save()
     return records

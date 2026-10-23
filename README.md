@@ -94,7 +94,9 @@ python3 snapshot.py     # freeze completed days; run daily
 ```
 
 The first run seeds everything still on disk; later runs catch up from the last recorded day.
-Finalized days are immutable — only *today* is ever parsed live.
+Finalized days are immutable — only days *after* the last finalized one (normally yesterday,
+before the 09:00 run, and today; at most 7) are parsed live, and the dashboard marks them
+"live — not yet frozen".
 
 **Your archive is yours.** `snapshots.jsonl` is gitignored and never leaves your machine. It
 contains your project names and session titles, so treat it the way you would the logs it came
@@ -106,8 +108,8 @@ from: do not commit it, and do not paste it into an issue.
 python3 serve.py        # http://127.0.0.1:8799
 ```
 
-Serves the dashboard with today's data merged live on every load: `/api/data` (archive + live
-today) and `/healthz`. Read-only — capture stays with `snapshot.py`. If the port is taken it
+Serves the dashboard with every unfinalized day merged live on every load: `/api/data` (archive +
+live days since the last finalized one) and `/healthz`. Read-only — capture stays with `snapshot.py`. If the port is taken it
 increments to the next free one and prints where it landed.
 
 On macOS, `./install-launchd.sh` supervises that server as a LaunchAgent
@@ -218,7 +220,7 @@ Python 3.11–3.13 in CI.
 | File | Role |
 |---|---|
 | `parse.py` | logs → per-day rollups (owns the `message.id` dedup) |
-| `ledger.py` | archive read/append + merge of frozen history with live today |
+| `ledger.py` | archive read/append + merge of frozen history with the live, unfinalized days |
 | `prices.py` / `prices.json` | dated rate table; cost frozen at capture |
 | `snapshot.py` | daily capture entry point (idempotent, catches up) |
 | `serve.py` | stdlib HTTP server: `/`, `/api/data`, `/healthz` |

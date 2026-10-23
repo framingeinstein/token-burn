@@ -347,3 +347,41 @@ def test_build_outcomes_section_gets_verdicts(tmp_path):
     sec = build_outcomes_section(tmp_path / "oc", [], "2026-09-15", "jason",
                                  guide=None, guide_error="why")
     assert sec["verdicts_unavailable"] == "why"
+
+
+# --- every unfinalised day is live (not just today) ---
+
+def test_build_payload_marks_yesterday_and_today_live_and_memo_stays_warm(tmp_path):
+    from datetime import date, timedelta
+    from ledger import append_day
+    from parse import SessionMemo
+    today = date(2026, 10, 22)
+    d0, d1, d2 = (today - timedelta(days=n) for n in (0, 1, 2))
+    zc = {"in": 0, "out": 0, "cc": 0, "cr": 0, "cost_usd": 0.0}
+    append_day(str(tmp_path / "none.jsonl"), {
+        "date": d2.isoformat(), "events": 1, "msgs": 1, "byModel": {"opus": dict(zc, out=1)},
+        "mainVsSub": {"main": dict(zc, out=1), "sub": dict(zc)},
+        "topProjects": [], "sampleSessions": []})
+    from usage_records import append_usage_records
+    append_usage_records(tmp_path / "usage", d2.isoformat(), [{
+        "v": 1, "day": d2.isoformat(), "actor": "human:jason", "on_behalf_of": None,
+        "requester_source": None, "repo": None, "branch": None, "issue": None,
+        "session": "frozen", "model": "claude-opus-4-8", "model_class": "opus",
+        "kind": "interactive", "calls": 1, "in": 1, "out": 1, "cc": 0, "cr": 0,
+        "cost_usd": 0.0, "ctx_buckets": {}}])
+    root = tmp_path / "logs"
+    _write_session(root / "y.jsonl", d1.isoformat(), 3, str(tmp_path))
+    _write_session(root / "t.jsonl", d0.isoformat(), 2, str(tmp_path))
+    memo = SessionMemo()
+    cfg = _memo_cfg(tmp_path, root, today.isoformat(), memo)
+    payload = build_payload(cfg)
+    by = {d["date"]: d for d in payload["days"]}
+    assert by[d1.isoformat()]["live"] is True and by[d0.isoformat()]["live"] is True
+    assert "live" not in by[d2.isoformat()]
+    assert payload["meta"]["live_days"] == [d1.isoformat(), d0.isoformat()]
+    eff = {d["date"]: d for d in payload["efficiency"]["days"]}
+    assert eff[d1.isoformat()]["live"] is True and eff[d0.isoformat()]["live"] is True
+    misses = memo.misses
+    assert misses == 2
+    build_payload(cfg)
+    assert memo.misses == misses               # warm: nothing re-read

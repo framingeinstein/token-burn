@@ -1,7 +1,7 @@
 """Zero-dependency local server for the token-burn dashboard.
 
   /          -> dashboard.html (served so it fetches data live)
-  /api/data  -> assemble_rollup(archive + live today) as JSON
+  /api/data  -> assemble_rollup(archive + live unfinalized days) as JSON
   /healthz   -> ok
 
 Binds --port (default 8799); if taken, increments to the next free port and
@@ -21,7 +21,7 @@ from ledger import assemble_rollup, today_str
 from cursor_local import read_cursor_activity
 from cursor_usage import load_cursor_usage
 from metric_guide import DEFAULT_PATH as DEFAULT_GUIDE_PATH, GuideError, load_guide
-from efficiency import build_efficiency_payload, collect_usage_records
+from efficiency import build_efficiency_payload, collect_usage_records, usage_live_since
 from usage_records import resolve_actor as resolve_usage_actor
 from outcomes import DEFAULT_CACHE_DIR, cache_paths, read_jsonl_latest, read_state
 from outcome_metrics import actor_login, build_outcomes_payload
@@ -128,8 +128,10 @@ def _build_payload(cfg, memo):
     guide, guide_error = load_metric_guide(cfg)
     payload["metric_guide"] = ({"available": True, **guide} if guide is not None
                                else {"available": False, "reason": guide_error})
+    usage_since = usage_live_since(cfg.get("usage_dir"), today)
     payload["efficiency"] = build_efficiency_payload(
-        usage_records, prices=prices, guide=guide, guide_error=guide_error)
+        usage_records, prices=prices, guide=guide, guide_error=guide_error,
+        live_days=sorted({r["day"] for r in usage_records if r["day"] >= usage_since}))
     payload["outcomes"] = build_outcomes_section(
         cfg.get("outcomes_cache_dir"), usage_records, today, actor_login(cfg.get("actor")),
         guide=guide, guide_error=guide_error)

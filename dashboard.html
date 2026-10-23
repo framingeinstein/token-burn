@@ -52,6 +52,7 @@
   td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .did { color:var(--ink); } .did .proj { color:var(--navy); font-weight:600; }
   .did .ses { color:var(--muted); }
+  .live { color:var(--gold); font-size:11px; font-weight:600; margin-left:6px; white-space:nowrap; }
   .vchip { position:relative; display:inline-block; margin-left:6px; padding:1px 8px; border-radius:10px;
     font-size:11px; font-weight:600; cursor:help; outline:none; vertical-align:middle; white-space:nowrap; }
   .vchip.good { background:var(--v-good-bg); color:var(--v-good-fg); }
@@ -157,6 +158,7 @@ function combinedDays(){
       if(sourceDay.topProjects) day.topProjects=sourceDay.topProjects;
       if(sourceDay.sampleSessions) day.sampleSessions=sourceDay.sampleSessions;
       if(sourceDay.mainVsSub) day.mainVsSub=sourceDay.mainVsSub;
+      if(sourceDay.live) day.live=true;
     }
   }
   return Object.values(byDate).sort((a,b)=>a.date.localeCompare(b.date));
@@ -172,6 +174,10 @@ function fmtTok(n){ n=Math.round(n);
   if(n>=1e3) return (n/1e3).toFixed(0)+'K'; return ''+n; }
 function fmtVal(v){ return METRIC==='cost' ? '$'+(v>=1000?(v/1000).toFixed(1)+'K':v.toFixed(0)) : fmtTok(v); }
 function dayVal(d){ return metricValue(dayComponents(d), METRIC); }
+// a day parsed live from the logs, not yet frozen into the ledger by the daily run
+const LIVE_NOTE='live — not yet frozen';
+const liveTag = d => (d && d.live) ? ` <span class="live" title="parsed live from the logs; the daily snapshot run freezes it">${LIVE_NOTE}</span>` : '';
+const liveTip = d => (d && d.live) ? ` (${LIVE_NOTE})` : '';
 const esc = s => (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 // ---------- heatmap ----------
@@ -199,7 +205,7 @@ function drawHeatmap(){
     const col=Math.floor(i/7), row=d.getDay();
     const x=PAD_L+col*(CELL+GAP), y=PAD_T+row*(CELL+GAP);
     const dd=byDate[iso]; const v=dd?dayVal(dd):0;
-    const tip=iso+(dd?(': '+fmtVal(v)):': —');
+    const tip=iso+(dd?(': '+fmtVal(v)):': —')+liveTip(dd);
     cells+=`<rect x="${x}" y="${y}" width="${CELL}" height="${CELL}" rx="2" fill="${colorFor(v)}"><title>${tip}</title></rect>`;
     if(d.getMonth()!==prevMonth && row<=1){ prevMonth=d.getMonth();
       months+=`<text x="${x}" y="${PAD_T-6}" font-size="10" fill="var(--muted)">${d.toLocaleString('en',{month:'short'})}</text>`; }
@@ -217,7 +223,7 @@ function drawHeatmap(){
 function drawTimeseries(){
   const days=activeDays(); const host=document.getElementById('timeseries');
   if(days.length<2){host.innerHTML='';return;}
-  const pts=days.map(d=>({date:new Date(d.date+'T00:00:00'), v:Math.max(1,dayVal(d))}));
+  const pts=days.map(d=>({date:new Date(d.date+'T00:00:00'), v:Math.max(1,dayVal(d)), d}));
   const W=920,H=300,L=54,R=16,T=14,B=28;
   const t0=pts[0].date.getTime(), t1=pts[pts.length-1].date.getTime();
   const vmax=Math.max(...pts.map(p=>p.v)), vmin=Math.min(...pts.map(p=>p.v));
@@ -234,7 +240,7 @@ function drawTimeseries(){
   for(const i of [...ticks].sort((a,b)=>a-b)){ const x=X(pts[i].date.getTime());
     xl+=`<text x="${x}" y="${H-8}" text-anchor="middle" font-size="10" fill="var(--muted)">${days[i].date.slice(5)}</text>`; }
   const line=pts.map((p,i)=>`${i?'L':'M'}${X(p.date.getTime()).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(' ');
-  const dots=pts.map(p=>`<circle cx="${X(p.date.getTime()).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.2" fill="var(--navy)"><title>${p.date.toISOString().slice(0,10)}: ${fmtVal(p.v)}</title></circle>`).join('');
+  const dots=pts.map(p=>`<circle cx="${X(p.date.getTime()).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.2" fill="var(--navy)"><title>${p.date.toISOString().slice(0,10)}: ${fmtVal(p.v)}${liveTip(p.d)}</title></circle>`).join('');
   host.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="${W}">${grid}<path d="${line}" fill="none" stroke="var(--navy)" stroke-width="1.6"/>${dots}${ax}${xl}</svg>`;
 }
 
@@ -245,7 +251,7 @@ function drawTopDays(){
   for(const d of top){
     const projs=(d.topProjects||[]).slice(0,3).map(p=>`<span class="proj">${esc(p.project)}</span>`).join(', ');
     const ses=(d.sampleSessions||[]).slice(0,2).map(s=>esc(s.label)).filter(Boolean).join(' · ');
-    rows+=`<tr><td>${d.date}</td><td class="num">${fmtVal(dayVal(d))}</td>
+    rows+=`<tr><td>${d.date}${liveTag(d)}</td><td class="num">${fmtVal(dayVal(d))}</td>
       <td class="did">${projs}${ses?` <span class="ses">— ${ses}</span>`:''}</td></tr>`;
   }
   document.getElementById('topdays').innerHTML=
@@ -398,7 +404,7 @@ function ctxBarRow(label,val,maxVal,W,color){
     <div style="color:var(--muted);font-variant-numeric:tabular-nums">${val==null?'—':fmtTok(val)+' ctx tok/call'}</div></div>`;
 }
 function drawEfficiencyChart(days){
-  const pts=days.filter(d=>d.cache_hit_rate!=null).map(d=>({date:new Date(d.date+'T00:00:00'), v:d.cache_hit_rate}));
+  const pts=days.filter(d=>d.cache_hit_rate!=null).map(d=>({date:new Date(d.date+'T00:00:00'), v:d.cache_hit_rate, d}));
   if(pts.length<2) return '<div style="color:var(--muted)">not enough days yet.</div>';
   const W=920,H=160,L=44,R=16,T=10,B=24;
   const t0=pts[0].date.getTime(), t1=pts[pts.length-1].date.getTime();
@@ -414,7 +420,7 @@ function drawEfficiencyChart(days){
   for(const i of [...ticks].sort((a,b)=>a-b)){ const x=X(pts[i].date.getTime());
     xl+=`<text x="${x}" y="${H-6}" text-anchor="middle" font-size="10" fill="var(--muted)">${pts[i].date.toISOString().slice(5,10)}</text>`; }
   const line=pts.map((p,i)=>`${i?'L':'M'}${X(p.date.getTime()).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(' ');
-  const dots=pts.map(p=>`<circle cx="${X(p.date.getTime()).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.2" fill="var(--navy)"><title>${p.date.toISOString().slice(0,10)}: ${fmtPct(p.v)}</title></circle>`).join('');
+  const dots=pts.map(p=>`<circle cx="${X(p.date.getTime()).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.2" fill="var(--navy)"><title>${p.date.toISOString().slice(0,10)}: ${fmtPct(p.v)}${liveTip(p.d)}</title></circle>`).join('');
   return `<svg viewBox="0 0 ${W} ${H}" width="${W}">${grid}<path d="${line}" fill="none" stroke="var(--navy)" stroke-width="1.6"/>${dots}${ax}${xl}</svg>`;
 }
 function drawEfficiency(){
@@ -578,7 +584,9 @@ function drawHeader(){
   const sourceName={claude:'Claude Code',cursor:'Cursor billed',combined:'Claude + Cursor'}[SOURCE];
   document.getElementById('subtitle').textContent=
     `${sourceName} · ${days.length} active days · tz ${m.tz}`+(SOURCE==='claude'?` · ${m.unique_messages.toLocaleString()} messages (deduped from ${m.assistant_events.toLocaleString()})`:'')+(SOURCE==='cursor'&&((DATA.cursor||{}).billed||{}).status!=='ok'?' · billed usage not configured':'');
-  document.getElementById('heatHint').textContent='each cell = one day, shaded by '+metricLabel()+'.';
+  const live=(m.live_days||[]);
+  document.getElementById('heatHint').innerHTML=esc('each cell = one day, shaded by '+metricLabel()+'.')+
+    (SOURCE!=='cursor'&&live.length?` <span class="live">${esc(live.join(', '))}: ${LIVE_NOTE}</span>`:'');
   document.getElementById('foot').textContent=
     `Claude: ~/.claude/projects, deduped by message.id, API-equivalent cost. Cursor: local activity plus daily aggregate usage events; Cursor cost uses chargedCents. Raw Cursor events and credentials are never stored.`;
 }
