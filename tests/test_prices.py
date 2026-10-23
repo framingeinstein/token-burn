@@ -66,5 +66,6 @@ def test_repo_table_rates(model, inp, out, read_mult):
 
 def test_repo_table_version_and_source():
     p = load_prices()
-    assert p["version"] == "2026-10-22"
+    assert p["version"] == "2026-10-22.1"     # bumped: haiku-5-5 added after 2026-10-22
+    assert any("bump" in n and "rates_version" in n for n in p["notes"])
     assert p["source"] == "Anthropic list prices (claude-api reference, cached 2026-10-06)"

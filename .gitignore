@@ -13,5 +13,7 @@ snapshots.jsonl
 cursor-snapshots.jsonl
 factory-snapshots.jsonl
 snapshots.jsonl.bak-*
+# reprice.py / refinalize backups: snapshots, factory-snapshots, usage/<day>, anywhere
+*.jsonl.bak-*
 .env.factory
 usage/
