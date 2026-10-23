@@ -77,7 +77,12 @@ is the number worth watching.
 
 Rates live in `prices.json` as a dated table (model id × date range, with a source). Cost is
 **frozen at capture time**, so correcting a rate never silently rewrites your history; re-price
-deliberately with `snapshot.py --refinalize --since YYYY-MM-DD`. Models with no known rate are
+deliberately with `python3 reprice.py --since YYYY-MM-DD` (a dry run that prints a per-day
+before/after table; add `--apply` to write, after it backs up each file it touches to
+`<file>.bak-reprice-<timestamp>`). It recomputes cost from the tokens already in the usage archive
+and corrects the ledgers by the difference, so it works for days whose raw logs Claude Code's
+retention has deleted — `snapshot.py --refinalize` re-parses logs and would lose those days. It is
+idempotent: a second `--apply` changes nothing. Models with no known rate are
 counted as `$0` and reported in `meta.unpriced_models` rather than being guessed at.
 
 ---
