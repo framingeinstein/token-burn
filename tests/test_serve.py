@@ -414,6 +414,8 @@ def test_build_payload_excludes_factory_test_runs_but_reports_their_cost(tmp_pat
     assert payload["efficiency"]["factory_test_runs_usd"] == pytest.approx(usd)
     assert payload["meta"]["totals"]["cost_usd"] == pytest.approx(usd)
     assert set(payload["days"][-1]["bySource"]) == {"factory:factory"}
+    assert payload["efficiency"]["factory_test_folders"] == ["runner-*", "signed-in-run",
+                                                             "test-runner"]
 
 
 def test_build_payload_factory_test_folders_configurable(tmp_path):
@@ -422,4 +424,5 @@ def test_build_payload_factory_test_folders_configurable(tmp_path):
     usd = 1000 * 10.0 / 1e6
     assert payload["efficiency"]["spend_usd"] == pytest.approx(2 * usd)
     assert payload["efficiency"]["factory_test_runs_usd"] == 0
+    assert payload["efficiency"]["factory_test_folders"] == []
     assert payload["meta"]["totals"]["cost_usd"] == pytest.approx(2 * usd)

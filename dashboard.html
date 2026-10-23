@@ -438,7 +438,7 @@ function drawEfficiency(){
   html+=effTile(fmtPct(eff.output_share), 'output share (overall)', V.output_share, 'agentic work is naturally low; shown for context');
   html+=effTile('$'+eff.spend_usd.toFixed(2), 'spend behind this section', null, '');
   html+='</div>';
-  if(eff.factory_test_runs_usd!=null) html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:8px">factory test runs $${eff.factory_test_runs_usd.toFixed(2)} — test/dev harness folders (runner-*, signed-in-run, test-runner), excluded from every metric and total</div>`;
+  if(eff.factory_test_runs_usd!=null) html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:8px">factory test runs $${eff.factory_test_runs_usd.toFixed(2)} — test/dev harness folders (${esc((eff.factory_test_folders||[]).join(', ')||'none')}), excluded from every metric and total</div>`;
   if(eff.verdicts_unavailable) html+=`<div style="color:var(--muted);font-size:11px;margin-bottom:8px">verdicts unavailable — ${esc(eff.verdicts_unavailable)}</div>`;
   html+=drawCostMix(eff.cost_mix);
   html+='<div style="color:var(--muted);font-size:12px;margin:14px 0 4px">cache hit rate over time</div>';

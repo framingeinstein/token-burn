@@ -206,3 +206,18 @@ def test_factory_day_records_test_folders_configurable(tmp_path):
     _mirror(tmp_path)
     _, meta = factory_day_records(tmp_path, "UTC", prices=PRICES, test_folders=[])
     assert meta["unique_messages"] == 5 + 3   # t1, t2 (once), u1 now counted
+
+
+def test_production_copy_wins_over_test_folder_copy_of_the_same_session(tmp_path):
+    # runner-a/ sorts BEFORE spine/: dedupe must still credit production
+    from efficiency import build_efficiency_payload
+    for top in ("runner-a", "spine"):
+        _write(tmp_path, f"{top}/58/wb-impl-spine-ab12c/sess-x.jsonl",
+               [_line("x1"), _line("x2", minute=1)])
+    recs = factory_usage_records(tmp_path, "UTC", PRICES)
+    assert {r["actor"] for r in recs} == {"factory:spine"}
+    assert sum(r["calls"] for r in recs) == 2
+    prod, test = split_test_runs(recs)
+    payload = build_efficiency_payload(prod, test_run_records=test)
+    assert payload["factory_test_runs_usd"] == 0
+    assert payload["spend_usd"] > 0

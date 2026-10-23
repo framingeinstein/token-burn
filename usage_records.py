@@ -48,7 +48,7 @@ import threading
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from factory_layout import attribute, expand_parts
+from factory_layout import attribute, expand_parts, is_test_folder
 from factory_layout import resolve_repo as _resolve_factory_repo
 from parse import _jsonl_files, _mtime_floor, _read, cost_usd, dedupe_messages, local_day, model_class
 
@@ -372,7 +372,9 @@ def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, unti
     itself. Records from test-run folders keep `actor: factory:<folder>` so
     consumers can split them off (`factory_layout.split_test_runs`). A message
     re-uploaded under a re-run execution (or repeated across parts) counts
-    once, same convention as `parse.factory_day_records`; every file of one
+    once, same convention as `parse.factory_day_records` -- production
+    folders are read before test-run folders, so a session copied into both
+    is always credited to production; every file of one
     session is grouped into ONE set of records (no record_key collisions),
     its calls numbered across all of them.
 
@@ -388,7 +390,11 @@ def factory_usage_records(root, tz_name, prices, repo_map=None, since=None, unti
         return []
     seen_ids = set()
     sessions = {}          # (actor, repo, kind, session) -> {"entries", "folder_issue"}
-    for f in expand_parts(_jsonl_files(root, _mtime_floor(since, tz))):
+    files = expand_parts(_jsonl_files(root, _mtime_floor(since, tz)))
+    # production folders first: a session copied into a test-run folder is
+    # credited to production by the message.id dedupe, whatever the path order
+    files.sort(key=lambda f: (is_test_folder(Path(f).relative_to(root).parts[0], test_folders), f))
+    for f in files:
         parts = Path(f).relative_to(root).parts
         if len(parts) < 2:
             continue

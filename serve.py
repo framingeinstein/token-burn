@@ -140,6 +140,9 @@ def _build_payload(cfg, memo):
         usage_records, prices=prices, guide=guide, guide_error=guide_error,
         live_days=sorted({r["day"] for r in usage_records if r["day"] >= usage_since}),
         test_run_records=test_run_records)
+    test_folders = cfg.get("factory_test_folders")
+    payload["efficiency"]["factory_test_folders"] = list(
+        DEFAULT_FACTORY_TEST_FOLDERS if test_folders is None else test_folders)
     payload["outcomes"] = build_outcomes_section(
         cfg.get("outcomes_cache_dir"), usage_records, today, actor_login(cfg.get("actor")),
         guide=guide, guide_error=guide_error)
