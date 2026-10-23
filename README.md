@@ -150,7 +150,10 @@ session. Each `message.id` counts once across re-uploaded sessions and parts, an
 usage lives in its own archive so backfilling it never re-derives your local days. Test/dev
 harness folders (`runner-*`, `signed-in-run`, `test-runner`; change with
 `--factory-test-folder`) are excluded from every metric and total and shown only as
-"factory test runs $" in the efficiency section. The dashboard's "by source" bars split this
+"factory test runs $" in the efficiency section. The mirror keeps every file, so a factory day
+frozen before its turns finished syncing can be re-frozen on its own with
+`python3 snapshot.py --refinalize --only factory --since YYYY-MM-DD` — it leaves `snapshots.jsonl`
+and `usage/` untouched (local days can't be re-derived once their raw logs are gone). The dashboard's "by source" bars split this
 machine from each factory repo.
 
 ## Cursor (optional)
